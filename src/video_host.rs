@@ -5,13 +5,21 @@
 //! over the video area and hand its handle to mpv via the `wid` option.
 //! WinUI content can't draw over this child (the "airspace" limit), so the
 //! controls live in a bar below it.
+//!
+//! Fullscreen uses the classic Win32 approach on the WinUI window: drop the
+//! frame styles and cover the monitor, then restore the saved placement.
 
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, EnumThreadWindows, GetClassNameW, GetClientRect, GetParent, HWND_TOP,
-    SWP_NOACTIVATE, SetWindowPos, WINDOW_EX_STYLE, WS_CHILD, WS_CLIPSIBLINGS, WS_DISABLED,
+    CreateWindowExW, EnumThreadWindows, GWL_STYLE, GetClassNameW, GetClientRect, GetParent,
+    GetWindowLongPtrW, GetWindowPlacement, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
+    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPlacement,
+    SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
     WS_VISIBLE,
 };
 use windows::core::{BOOL, w};
@@ -21,6 +29,8 @@ const WINUI_WINDOW_CLASS: &str = "WinUIDesktopWin32WindowClass";
 pub struct VideoHost {
     parent: HWND,
     child: HWND,
+    /// Window style and placement saved while fullscreen, for restoring.
+    windowed: Option<(isize, WINDOWPLACEMENT)>,
 }
 
 impl VideoHost {
@@ -32,9 +42,9 @@ impl VideoHost {
                 WINDOW_EX_STYLE(0),
                 w!("STATIC"),
                 w!(""),
-                // Disabled so clicks fall through to the parent instead of a
-                // STATIC control; mpv handles its own input window inside.
-                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_DISABLED,
+                // Left enabled: mpv creates its own window inside this one and
+                // handles mouse and keyboard input there.
+                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                 0,
                 0,
                 0,
@@ -46,7 +56,74 @@ impl VideoHost {
             )
             .ok()?
         };
-        Some(Self { parent, child })
+        Some(Self {
+            parent,
+            child,
+            windowed: None,
+        })
+    }
+
+    /// The WinUI top-level window, e.g. to own dialogs.
+    pub fn window(&self) -> HWND {
+        self.parent
+    }
+
+    pub fn is_fullscreen(&self) -> bool {
+        self.windowed.is_some()
+    }
+
+    /// Switches the WinUI window between fullscreen and its previous placement.
+    pub fn set_fullscreen(&mut self, fullscreen: bool) {
+        if fullscreen == self.is_fullscreen() {
+            return;
+        }
+        unsafe {
+            if fullscreen {
+                let style = GetWindowLongPtrW(self.parent, GWL_STYLE);
+                let mut placement = WINDOWPLACEMENT {
+                    length: size_of::<WINDOWPLACEMENT>() as u32,
+                    ..Default::default()
+                };
+                let mut monitor = MONITORINFO {
+                    cbSize: size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                let hmon = MonitorFromWindow(self.parent, MONITOR_DEFAULTTONEAREST);
+                if GetWindowPlacement(self.parent, &mut placement).is_err()
+                    || !GetMonitorInfoW(hmon, &mut monitor).as_bool()
+                {
+                    return;
+                }
+                SetWindowLongPtrW(
+                    self.parent,
+                    GWL_STYLE,
+                    style & !(WS_OVERLAPPEDWINDOW.0 as isize),
+                );
+                let r = monitor.rcMonitor;
+                let _ = SetWindowPos(
+                    self.parent,
+                    Some(HWND_TOP),
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                );
+                self.windowed = Some((style, placement));
+            } else if let Some((style, placement)) = self.windowed.take() {
+                SetWindowLongPtrW(self.parent, GWL_STYLE, style);
+                let _ = SetWindowPlacement(self.parent, &placement);
+                let _ = SetWindowPos(
+                    self.parent,
+                    None,
+                    0,
+                    0,
+                    0,
+                    0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                );
+            }
+        }
     }
 
     /// The handle to pass to mpv's `wid` option.
