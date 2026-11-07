@@ -8,6 +8,7 @@
 
 mod app_icon;
 mod file_dialog;
+mod glyph;
 mod mpv_events;
 mod tracks;
 mod video_host;
@@ -22,8 +23,10 @@ use windows_reactor::*;
 
 /// Height of the seek row and the controls row under the video, in
 /// device-independent pixels.
+/// Height of the custom title bar (WinUI's "tall" title bar).
+const TITLE_DIPS: f64 = 48.0;
 const SEEK_DIPS: f64 = 40.0;
-const CONTROLS_DIPS: f64 = 48.0;
+const CONTROLS_DIPS: f64 = 56.0;
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
 
 #[derive(Clone)]
@@ -34,6 +37,7 @@ enum Message {
     Seek(f64),
     Volume(f64),
     ToggleFullscreen,
+    ToggleMute,
     /// A pick from the Tracks menu, identified by its label.
     TrackMenu(String),
     Resized,
@@ -51,6 +55,7 @@ struct Player {
     position: f64,
     duration: f64,
     volume: f64,
+    muted: bool,
     tracks: Tracks,
     /// Play the file from the command line once the video window exists.
     autoplay: bool,
@@ -74,7 +79,7 @@ impl Player {
             self.error = Some(format!("mpv rejected wid: {e}"));
             return;
         }
-        host.layout(BAR_DIPS);
+        host.layout(TITLE_DIPS, BAR_DIPS);
         self.video = Some(host);
         if std::mem::take(&mut self.autoplay)
             && let Err(e) = self.load(mpv.clone().as_ref())
@@ -83,18 +88,21 @@ impl Player {
         }
     }
 
-    fn bar_dips(&self) -> f64 {
-        match &self.video {
-            Some(video) if video.is_fullscreen() => 0.0,
-            _ => BAR_DIPS,
+    /// Space above and below the video: title bar and control bar, or none
+    /// in fullscreen.
+    fn insets(fullscreen: bool) -> (f64, f64) {
+        if fullscreen {
+            (0.0, 0.0)
+        } else {
+            (TITLE_DIPS, BAR_DIPS)
         }
     }
 
     fn set_fullscreen(&mut self, fullscreen: bool) {
-        let bar = if fullscreen { 0.0 } else { BAR_DIPS };
+        let (top, bottom) = Self::insets(fullscreen);
         if let Some(video) = &mut self.video {
             video.set_fullscreen(fullscreen);
-            video.layout(bar);
+            video.layout(top, bottom);
         }
     }
 
@@ -141,6 +149,7 @@ impl Player {
                 let fullscreen = self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
                 self.set_fullscreen(!fullscreen);
             }
+            Message::ToggleMute => mpv.command("cycle", &["mute"])?,
             Message::TrackMenu(label) => {
                 if let Some((property, value)) = self.tracks.choice(&label) {
                     mpv.set_property(property, value.as_str())?;
@@ -149,7 +158,8 @@ impl Player {
             }
             Message::Resized => {
                 if let Some(video) = &self.video {
-                    video.layout(self.bar_dips());
+                    let (top, bottom) = Self::insets(video.is_fullscreen());
+                    video.layout(top, bottom);
                 }
             }
             Message::Mpv(updates) => {
@@ -188,6 +198,7 @@ impl Player {
             MpvUpdate::Duration(v) => self.duration = v,
             MpvUpdate::Paused(v) => self.paused = v,
             MpvUpdate::Volume(v) => self.volume = v,
+            MpvUpdate::Muted(v) => self.muted = v,
             MpvUpdate::FileLoaded => {
                 self.error = None;
                 if let Some(mpv) = &self.mpv {
@@ -215,7 +226,8 @@ impl Player {
         });
     }
 
-    fn status(&self) -> String {
+    /// Title bar subtitle: the current error, else the file name.
+    fn subtitle(&self) -> String {
         if let Some(error) = &self.error {
             return error.clone();
         }
@@ -223,15 +235,15 @@ impl Player {
             .file
             .as_deref()
             .map(|f| f.rsplit(['\\', '/']).next().unwrap_or(f))
-            .unwrap_or("No file. Click Open.");
-        if self.idle {
-            name.to_string()
+            .unwrap_or("Open a file or drop one on the window");
+        // The TitleBar doesn't trim its subtitle, and a long one runs under
+        // the caption buttons in narrow windows.
+        const MAX_CHARS: usize = 40;
+        if name.chars().count() > MAX_CHARS {
+            let short: String = name.chars().take(MAX_CHARS - 1).collect();
+            format!("{short}\u{2026}")
         } else {
-            format!(
-                "{} / {}  {name}",
-                clock(self.position),
-                clock(self.duration)
-            )
+            name.to_string()
         }
     }
 }
@@ -277,6 +289,7 @@ impl Component for Player {
             position: 0.0,
             duration: 0.0,
             volume: 100.0,
+            muted: false,
             tracks: Tracks::default(),
         };
         player.poll_events(context);
@@ -289,7 +302,11 @@ impl Component for Player {
         // player keys work and Space doesn't re-press the same button.
         let refocus = matches!(
             message,
-            Message::OpenFile | Message::PlayPause | Message::Stop | Message::ToggleFullscreen
+            Message::OpenFile
+                | Message::PlayPause
+                | Message::Stop
+                | Message::ToggleFullscreen
+                | Message::ToggleMute
         );
         if let Err(e) = self.handle(message, context) {
             self.error = Some(mpv_events::describe(&e));
@@ -305,29 +322,40 @@ impl Component for Player {
         context.on_window_size(context.callback(|_: WindowSize| Message::Resized));
 
         let fullscreen = self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
-        let play_label = if !self.idle && !self.paused {
-            "Pause"
-        } else {
-            "Play"
+        let playing = !self.idle && !self.paused;
+
+        // A Fluent icon button, the way Windows 11 media apps draw controls.
+        let icon_button = |glyph: &str, tip: &str, message: Message, column: i32| {
+            // Natural size: a fixed 40x40 left too little room inside the
+            // default padding and clipped the glyphs.
+            Button::new()
+                .style(ButtonStyle::Subtle)
+                .automation_name(tip)
+                .vertical_alignment(VerticalAlignment::Center)
+                .grid_column(column)
+                .on_click(context.message(message))
+                .content(FontIcon::new().glyph(glyph))
+                .tooltip(tip)
         };
 
-        let buttons = StackPanel::new()
-            .orientation(Orientation::Horizontal)
-            .spacing(8.0)
-            .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(0)
-            .children((
-                Button::new()
-                    .on_click(context.message(Message::OpenFile))
-                    .content("Open"),
-                Button::new()
-                    .on_click(context.message(Message::PlayPause))
-                    .content(play_label),
-                Button::new()
-                    .on_click(context.message(Message::Stop))
-                    .content("Stop"),
-            ));
+        // Title bar: drawn by WinUI in the window's own theme (instead of the
+        // white system caption), with the file name or error as subtitle.
+        // It stays in the tree in fullscreen (its row collapses): removing it
+        // makes reactor clear the window's title bar, which WinUI rejects
+        // once the frame styles are gone, and reactor treats that as fatal.
+        let title_bar = TitleBar::new()
+            .title("rust-winui-mpv")
+            .subtitle(self.subtitle())
+            .preferred_height(WindowTitleBarHeight::Tall)
+            .grid_row(0);
 
+        // Seek row: position, seek bar, duration.
+        let time = |seconds: f64, column: i32| {
+            TextBlock::new()
+                .text(clock(seconds))
+                .vertical_alignment(VerticalAlignment::Center)
+                .grid_column(column)
+        };
         let seek = Slider::new()
             .minimum(0.0)
             .maximum(self.duration.max(1.0))
@@ -335,83 +363,129 @@ impl Component for Player {
             .step_frequency(1.0)
             .is_enabled(!self.idle && self.duration > 0.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(0)
-            .on_value_changed(context.callback(Message::Seek));
-
-        // A MenuFlyout on a button rather than two ComboBoxes: it fits narrow
-        // windows, and it isn't rebuilt under the pointer by the periodic
-        // re-renders from mpv's position updates.
-        let tracks_button = Button::new()
-            .is_enabled(!self.tracks.is_empty())
-            .vertical_alignment(VerticalAlignment::Center)
             .grid_column(1)
-            .content("Tracks")
-            .menu(Menu::new(
-                self.tracks.menu(),
-                context.callback(Message::TrackMenu),
+            .on_value_changed(context.callback(Message::Seek));
+        let seek_row = Grid::new()
+            .column_spacing(12.0)
+            .columns([GridLength::Auto, GridLength::Star(1.0), GridLength::Auto])
+            .margin(Thickness::new(16.0, 0.0, 16.0, 0.0))
+            .grid_row(2)
+            .children((time(self.position, 0), seek, time(self.duration, 2)));
+
+        // Controls row: open and tracks on the left, transport in the middle,
+        // volume and fullscreen on the right.
+        let left = StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(4.0)
+            .horizontal_alignment(HorizontalAlignment::Left)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(0)
+            .children((
+                icon_button(glyph::OPEN, "Open file", Message::OpenFile, 0),
+                // A MenuFlyout on a button rather than ComboBoxes: it fits
+                // narrow windows and isn't rebuilt under the pointer by the
+                // periodic re-renders from mpv's position updates.
+                Button::new()
+                    .style(ButtonStyle::Subtle)
+                    .automation_name("Audio and subtitle tracks")
+                    .is_enabled(!self.tracks.is_empty())
+                    .content(FontIcon::new().glyph(glyph::TRACKS))
+                    .menu(Menu::new(
+                        self.tracks.menu(),
+                        context.callback(Message::TrackMenu),
+                    )),
             ));
 
-        let status = TextBlock::new()
-            .text(self.status())
-            .text_trimming(TextTrimming::CharacterEllipsis)
+        let transport = StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(8.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(2);
+            .grid_column(1)
+            .children((
+                icon_button(glyph::STOP, "Stop", Message::Stop, 0),
+                Button::new()
+                    .style(ButtonStyle::Accent)
+                    .automation_name(if playing { "Pause" } else { "Play" })
+                    .min_width(48.0)
+                    .min_height(40.0)
+                    .on_click(context.message(Message::PlayPause))
+                    .content(FontIcon::new().glyph(if playing {
+                        glyph::PAUSE
+                    } else {
+                        glyph::PLAY
+                    }))
+                    .tooltip(if playing {
+                        "Pause (Space)"
+                    } else {
+                        "Play (Space)"
+                    }),
+            ));
 
         let volume = Slider::new()
             .minimum(0.0)
             .maximum(100.0)
             .value(self.volume)
+            .automation_name("Volume")
+            // Narrow enough that the speaker and full screen buttons keep
+            // their room at 800 px and 175% scaling (~460 DIPs).
+            .width(72.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(1)
             .on_value_changed(context.callback(Message::Volume));
-
-        let fullscreen_button = Button::new()
+        let right = StackPanel::new()
+            .orientation(Orientation::Horizontal)
+            .spacing(4.0)
+            .horizontal_alignment(HorizontalAlignment::Right)
             .vertical_alignment(VerticalAlignment::Center)
             .grid_column(2)
-            .on_click(context.message(Message::ToggleFullscreen))
-            .content(if fullscreen {
-                "Exit fullscreen"
-            } else {
-                "Fullscreen"
-            });
+            .children((
+                icon_button(
+                    glyph::volume(self.volume, self.muted),
+                    if self.muted { "Unmute (M)" } else { "Mute (M)" },
+                    Message::ToggleMute,
+                    0,
+                ),
+                volume,
+                icon_button(
+                    if fullscreen {
+                        glyph::EXIT_FULLSCREEN
+                    } else {
+                        glyph::FULLSCREEN
+                    },
+                    if fullscreen {
+                        "Exit full screen (F)"
+                    } else {
+                        "Full screen (F)"
+                    },
+                    Message::ToggleFullscreen,
+                    0,
+                ),
+            ));
 
-        // Seek, volume and fullscreen share the upper row; the buttons and
-        // the status text (which takes what's left and trims) the lower one.
-        // At 175% scaling an 800 px window is only ~460 DIPs wide, so nothing
-        // fixed-width may end up after the status column.
-        let seek_row = Grid::new()
-            .column_spacing(12.0)
+        let controls = Grid::new()
             .columns([
                 GridLength::Star(1.0),
-                GridLength::Pixel(100.0),
                 GridLength::Auto,
+                GridLength::Star(1.0),
             ])
-            .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
-            .grid_row(1)
-            .children((seek, volume, fullscreen_button));
+            .margin(Thickness::new(12.0, 0.0, 12.0, 4.0))
+            .grid_row(3)
+            .children((left, transport, right));
 
-        let bar = Grid::new()
-            .column_spacing(12.0)
-            .columns([GridLength::Auto, GridLength::Auto, GridLength::Star(1.0)])
-            .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
-            .grid_row(2)
-            .children((buttons, tracks_button, status));
-
-        // Row 0 is left empty: the native video window sits over it. In
-        // fullscreen the seek and control rows collapse so video fills the
-        // screen.
-        let (seek_height, controls_height) = if fullscreen {
-            (0.0, 0.0)
+        // Row 1 is left empty: the native video window sits over it. In
+        // fullscreen the title bar and both control rows collapse.
+        let (title, seek_height, controls_height) = if fullscreen {
+            (0.0, 0.0, 0.0)
         } else {
-            (SEEK_DIPS, CONTROLS_DIPS)
+            (TITLE_DIPS, SEEK_DIPS, CONTROLS_DIPS)
         };
         Grid::new()
             .rows([
+                GridLength::Pixel(title),
                 GridLength::Star(1.0),
                 GridLength::Pixel(seek_height),
                 GridLength::Pixel(controls_height),
             ])
-            .children((seek_row, bar))
+            .children((title_bar, seek_row, controls))
     }
 }
 
