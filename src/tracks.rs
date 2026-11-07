@@ -1,6 +1,7 @@
 //! Audio and subtitle track lists, read from mpv's `track-list` property.
 
 use libmpv2::Mpv;
+use windows_reactor::MenuItem;
 
 #[derive(Clone, Debug, Default)]
 pub struct Track {
@@ -46,24 +47,67 @@ impl Tracks {
         tracks
     }
 
-    /// Index of the selected audio track in `audio`.
-    pub fn audio_index(&self) -> Option<usize> {
-        self.audio.iter().position(|t| t.selected)
+    pub fn is_empty(&self) -> bool {
+        self.audio.is_empty() && self.subtitles.is_empty()
     }
 
-    /// Index in the subtitle picker, where 0 is "Off".
-    pub fn subtitle_index(&self) -> usize {
+    /// Items for the Tracks menu: an Audio and a Subtitles submenu, with the
+    /// current choice marked.
+    pub fn menu(&self) -> Vec<MenuItem> {
+        let item = |key: String, label: String, selected: bool| {
+            let mark = if selected { CHECK } else { NO_CHECK };
+            MenuItem::item(key, format!("{mark}{label}"))
+        };
+        let audio = self
+            .audio
+            .iter()
+            .map(|t| item(format!("a{}", t.id), audio_label(t), t.selected));
+        let subtitles_off = !self.subtitles.iter().any(|t| t.selected);
+        let subtitles = std::iter::once(item("s-off".into(), SUBTITLES_OFF.into(), subtitles_off))
+            .chain(
+                self.subtitles
+                    .iter()
+                    .map(|t| item(format!("s{}", t.id), subtitle_label(t), t.selected)),
+            );
+        vec![
+            MenuItem::submenu("audio", "Audio", audio),
+            MenuItem::submenu("subtitles", "Subtitles", subtitles),
+        ]
+    }
+
+    /// Maps a clicked menu label back to the mpv property and value to set.
+    pub fn choice(&self, clicked: &str) -> Option<(&'static str, String)> {
+        let label = clicked
+            .strip_prefix(CHECK)
+            .or_else(|| clicked.strip_prefix(NO_CHECK))
+            .unwrap_or(clicked);
+        if label == SUBTITLES_OFF {
+            return Some(("sid", "no".into()));
+        }
+        if let Some(t) = self.audio.iter().find(|t| audio_label(t) == label) {
+            return Some(("aid", t.id.to_string()));
+        }
         self.subtitles
             .iter()
-            .position(|t| t.selected)
-            .map_or(0, |i| i + 1)
+            .find(|t| subtitle_label(t) == label)
+            .map(|t| ("sid", t.id.to_string()))
     }
+}
 
-    pub fn subtitle_labels(&self) -> Vec<String> {
-        std::iter::once("Subtitles off".to_string())
-            .chain(self.subtitles.iter().map(|t| t.label.clone()))
-            .collect()
-    }
+const CHECK: &str = "\u{2713}  ";
+const NO_CHECK: &str = "    ";
+const SUBTITLES_OFF: &str = "Off";
+
+// The menu reports clicks by label, so labels carry the track id to stay
+// unique even when two tracks share a language and codec.
+// Audio and subtitle ids overlap (both start at 1), so the kind is part of
+// the label too.
+fn audio_label(t: &Track) -> String {
+    format!("Audio {}: {}", t.id, t.label)
+}
+
+fn subtitle_label(t: &Track) -> String {
+    format!("Subtitle {}: {}", t.id, t.label)
 }
 
 /// "English: Commentary (aac)", falling back to "Track 2".

@@ -24,8 +24,6 @@ use windows_reactor::*;
 const SEEK_DIPS: f64 = 32.0;
 const CONTROLS_DIPS: f64 = 48.0;
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
-/// Width of the audio and subtitle pickers.
-const TRACK_PICKER_DIPS: f64 = 140.0;
 
 #[derive(Clone)]
 enum Message {
@@ -35,8 +33,8 @@ enum Message {
     Seek(f64),
     Volume(f64),
     ToggleFullscreen,
-    AudioTrack(Option<usize>),
-    SubtitleTrack(Option<usize>),
+    /// A pick from the Tracks menu, identified by its label.
+    TrackMenu(String),
     Resized,
     Mpv(Vec<MpvUpdate>),
 }
@@ -79,7 +77,7 @@ impl Player {
         if std::mem::take(&mut self.autoplay)
             && let Err(e) = self.load(mpv.clone().as_ref())
         {
-            self.error = Some(format!("mpv error: {e}"));
+            self.error = Some(mpv_events::describe(&e));
         }
     }
 
@@ -141,23 +139,12 @@ impl Player {
                 let fullscreen = self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
                 self.set_fullscreen(!fullscreen);
             }
-            Message::AudioTrack(Some(i)) => {
-                if let Some(track) = self.tracks.audio.get(i) {
-                    mpv.set_property("aid", track.id)?;
+            Message::TrackMenu(label) => {
+                if let Some((property, value)) = self.tracks.choice(&label) {
+                    mpv.set_property(property, value.as_str())?;
                     self.tracks = Tracks::load(&mpv);
                 }
             }
-            Message::SubtitleTrack(Some(0)) => {
-                mpv.set_property("sid", "no")?;
-                self.tracks = Tracks::load(&mpv);
-            }
-            Message::SubtitleTrack(Some(i)) => {
-                if let Some(track) = self.tracks.subtitles.get(i - 1) {
-                    mpv.set_property("sid", track.id)?;
-                    self.tracks = Tracks::load(&mpv);
-                }
-            }
-            Message::AudioTrack(None) | Message::SubtitleTrack(None) => {}
             Message::Resized => {
                 if let Some(video) = &self.video {
                     video.layout(self.bar_dips());
@@ -303,7 +290,7 @@ impl Component for Player {
             Message::OpenFile | Message::PlayPause | Message::Stop | Message::ToggleFullscreen
         );
         if let Err(e) = self.handle(message, context) {
-            self.error = Some(format!("mpv error: {e}"));
+            self.error = Some(mpv_events::describe(&e));
         }
         if refocus && let Some(video) = &self.video {
             video.focus();
@@ -350,43 +337,36 @@ impl Component for Player {
             .grid_row(1)
             .on_value_changed(context.callback(Message::Seek));
 
-        let audio = ComboBox::new()
-            .placeholder_text("Audio")
-            .items_source(self.tracks.audio.iter().map(|t| t.label.clone()))
-            .selected_index(self.tracks.audio_index())
-            .is_enabled(!self.tracks.audio.is_empty())
-            .width(TRACK_PICKER_DIPS)
+        // A MenuFlyout on a button rather than two ComboBoxes: it fits narrow
+        // windows, and it isn't rebuilt under the pointer by the periodic
+        // re-renders from mpv's position updates.
+        let tracks_button = Button::new()
+            .is_enabled(!self.tracks.is_empty())
             .vertical_alignment(VerticalAlignment::Center)
             .grid_column(1)
-            .on_selection_changed(context.callback(Message::AudioTrack));
-
-        let subtitles = ComboBox::new()
-            .placeholder_text("Subtitles")
-            .items_source(self.tracks.subtitle_labels())
-            .selected_index(self.tracks.subtitle_index())
-            .is_enabled(!self.tracks.subtitles.is_empty())
-            .width(TRACK_PICKER_DIPS)
-            .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(2)
-            .on_selection_changed(context.callback(Message::SubtitleTrack));
+            .content("Tracks")
+            .menu(Menu::new(
+                self.tracks.menu(),
+                context.callback(Message::TrackMenu),
+            ));
 
         let status = TextBlock::new()
             .text(self.status())
             .text_trimming(TextTrimming::CharacterEllipsis)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(3);
+            .grid_column(2);
 
         let volume = Slider::new()
             .minimum(0.0)
             .maximum(100.0)
             .value(self.volume)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(4)
+            .grid_column(3)
             .on_value_changed(context.callback(Message::Volume));
 
         let fullscreen_button = Button::new()
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(5)
+            .grid_column(4)
             .on_click(context.message(Message::ToggleFullscreen))
             .content(if fullscreen {
                 "Exit fullscreen"
@@ -401,14 +381,13 @@ impl Component for Player {
             .columns([
                 GridLength::Auto,
                 GridLength::Auto,
-                GridLength::Auto,
                 GridLength::Star(1.0),
                 GridLength::Pixel(110.0),
                 GridLength::Auto,
             ])
             .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
             .grid_row(2)
-            .children((buttons, audio, subtitles, status, volume, fullscreen_button));
+            .children((buttons, tracks_button, status, volume, fullscreen_button));
 
         // Row 0 is left empty: the native video window sits over it. In
         // fullscreen the seek and control rows collapse so video fills the

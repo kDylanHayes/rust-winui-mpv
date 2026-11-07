@@ -52,7 +52,7 @@ pub fn next_batch(mpv: &Arc<Mpv>, cancelled: impl Fn() -> bool) -> Vec<MpvUpdate
                     first_at.get_or_insert_with(Instant::now);
                 }
             }
-            Some(Err(e)) => batch.push(MpvUpdate::Error(e.to_string())),
+            Some(Err(e)) => batch.push(MpvUpdate::Error(describe(&e))),
             None if !batch.is_empty() => break,
             None => {}
         }
@@ -61,6 +61,24 @@ pub fn next_batch(mpv: &Arc<Mpv>, cancelled: impl Fn() -> bool) -> Vec<MpvUpdate
         }
     }
     batch
+}
+
+/// Readable text for mpv's numeric error codes, which libmpv2 shows as
+/// `Raw(-16)`. The texts follow mpv's `client.h`.
+pub fn describe(e: &libmpv2::Error) -> String {
+    let libmpv2::Error::Raw(code) = e else {
+        return e.to_string();
+    };
+    let text = match code {
+        -13 => "Loading the file failed",
+        -14 => "Couldn't initialize audio output",
+        -15 => "Couldn't initialize video output",
+        -16 => "Nothing to play (no audio or video in this file)",
+        -17 => "Unrecognized file format",
+        -18 => "Not supported",
+        _ => return format!("mpv error {code}"),
+    };
+    text.to_string()
 }
 
 fn convert(event: Event<'_>) -> Option<MpvUpdate> {
