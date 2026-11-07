@@ -1,0 +1,93 @@
+# Builds, lints and tests the app on a Windows runner.
+#
+# mpv comes from the latest shinchiro dev build, and mpv.lib is generated from
+# the DLL's exports exactly as README.md describes, so CI exercises the same
+# setup as a local build. The headless test in tests/ runs real libmpv with
+# no audio or video output.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  MPV_DIR: ${{ github.workspace }}\mpv
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      # Puts dumpbin and lib on PATH.
+      - uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Find latest mpv dev build
+        id: mpv
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $release = gh release view --repo shinchiro/mpv-winbuild-cmake --json tagName,assets | ConvertFrom-Json
+          # The plain x86_64 build, not the x86_64-v3 variant.
+          $asset = $release.assets | Where-Object { $_.name -match '^mpv-dev-x86_64-\d{8}-git-.*\.7z$' } | Select-Object -First 1
+          if (-not $asset) { throw "No mpv-dev-x86_64 asset in release $($release.tagName)" }
+          "name=$($asset.name)" >> $env:GITHUB_OUTPUT
+          "url=$($asset.url)" >> $env:GITHUB_OUTPUT
+          Write-Host "Using $($asset.name)"
+
+      - uses: actions/cache@v4
+        id: mpv-cache
+        with:
+          path: mpv
+          key: ${{ steps.mpv.outputs.name }}
+
+      - name: Download mpv and generate mpv.lib
+        if: steps.mpv-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri '${{ steps.mpv.outputs.url }}' -OutFile mpv-dev.7z
+          7z x mpv-dev.7z -ompv -y | Out-Null
+          Push-Location mpv
+          $names = dumpbin /exports libmpv-2.dll |
+            Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)' |
+            ForEach-Object { $_.Matches[0].Groups[1].Value }
+          if ($names.Count -lt 50) { throw "Only found $($names.Count) exports in libmpv-2.dll" }
+          @('EXPORTS') + $names | Set-Content mpv.def
+          lib /nologo /def:mpv.def /name:libmpv-2.dll /out:mpv.lib /MACHINE:X64
+          Pop-Location
+
+      # Test executables live in target/debug/deps, so let them find the DLL.
+      - name: Add mpv to PATH
+        shell: pwsh
+        run: Add-Content $env:GITHUB_PATH "$env:MPV_DIR"
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --locked
+
+      - name: Test
+        run: cargo test --locked -- --nocapture

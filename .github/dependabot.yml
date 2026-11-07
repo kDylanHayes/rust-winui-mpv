@@ -1,7 +1,7 @@
 # Keeps dependencies on their latest releases.
-# Dependabot opens a PR when a new version appears; nothing merges without review,
-# because CI can't build this Windows-only app and windows-reactor 0.x releases
-# often change APIs (e.g. 0.100 -> 0.101).
+# Dependabot opens a PR when a new version appears and CI builds and tests it on
+# Windows. Nothing merges without review, because windows-reactor 0.x releases
+# often change APIs (e.g. 0.100 -> 0.101) and CI can't check the UI itself.
 version: 2
 updates:
   - package-ecosystem: "cargo"
