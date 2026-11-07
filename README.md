@@ -1,3 +1,5 @@
+<img src="assets/logo.svg" alt="rust-winui-mpv logo: the letters DH with a purple play button over them" width="128" height="128">
+
 # rust-winui-mpv
 
 A personal prototype: a Windows video player with a **WinUI 3 frontend written in Rust**
