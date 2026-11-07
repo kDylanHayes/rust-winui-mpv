@@ -231,11 +231,20 @@ impl Player {
         if let Some(error) = &self.error {
             return error.clone();
         }
-        self.file
+        let name = self
+            .file
             .as_deref()
             .map(|f| f.rsplit(['\\', '/']).next().unwrap_or(f))
-            .unwrap_or("Open a file or drop one on the window")
-            .to_string()
+            .unwrap_or("Open a file or drop one on the window");
+        // The TitleBar doesn't trim its subtitle, and a long one runs under
+        // the caption buttons in narrow windows.
+        const MAX_CHARS: usize = 40;
+        if name.chars().count() > MAX_CHARS {
+            let short: String = name.chars().take(MAX_CHARS - 1).collect();
+            format!("{short}\u{2026}")
+        } else {
+            name.to_string()
+        }
     }
 }
 
@@ -317,10 +326,11 @@ impl Component for Player {
 
         // A Fluent icon button, the way Windows 11 media apps draw controls.
         let icon_button = |glyph: &str, tip: &str, message: Message, column: i32| {
+            // Natural size: a fixed 40x40 left too little room inside the
+            // default padding and clipped the glyphs.
             Button::new()
                 .style(ButtonStyle::Subtle)
-                .width(40.0)
-                .height(40.0)
+                .automation_name(tip)
                 .vertical_alignment(VerticalAlignment::Center)
                 .grid_column(column)
                 .on_click(context.message(message))
@@ -330,15 +340,14 @@ impl Component for Player {
 
         // Title bar: drawn by WinUI in the window's own theme (instead of the
         // white system caption), with the file name or error as subtitle.
-        // Omitted in fullscreen, where the frame is gone too.
-        let title_bar: Option<View> = (!fullscreen).then(|| {
-            TitleBar::new()
-                .title("rust-winui-mpv")
-                .subtitle(self.subtitle())
-                .preferred_height(WindowTitleBarHeight::Tall)
-                .grid_row(0)
-                .into()
-        });
+        // It stays in the tree in fullscreen (its row collapses): removing it
+        // makes reactor clear the window's title bar, which WinUI rejects
+        // once the frame styles are gone, and reactor treats that as fatal.
+        let title_bar = TitleBar::new()
+            .title("rust-winui-mpv")
+            .subtitle(self.subtitle())
+            .preferred_height(WindowTitleBarHeight::Tall)
+            .grid_row(0);
 
         // Seek row: position, seek bar, duration.
         let time = |seconds: f64, column: i32| {
@@ -378,8 +387,7 @@ impl Component for Player {
                 // periodic re-renders from mpv's position updates.
                 Button::new()
                     .style(ButtonStyle::Subtle)
-                    .width(40.0)
-                    .height(40.0)
+                    .automation_name("Audio and subtitle tracks")
                     .is_enabled(!self.tracks.is_empty())
                     .content(FontIcon::new().glyph(glyph::TRACKS))
                     .menu(Menu::new(
@@ -397,8 +405,9 @@ impl Component for Player {
                 icon_button(glyph::STOP, "Stop", Message::Stop, 0),
                 Button::new()
                     .style(ButtonStyle::Accent)
-                    .width(48.0)
-                    .height(48.0)
+                    .automation_name(if playing { "Pause" } else { "Play" })
+                    .min_width(48.0)
+                    .min_height(40.0)
                     .on_click(context.message(Message::PlayPause))
                     .content(FontIcon::new().glyph(if playing {
                         glyph::PAUSE
@@ -416,7 +425,10 @@ impl Component for Player {
             .minimum(0.0)
             .maximum(100.0)
             .value(self.volume)
-            .width(110.0)
+            .automation_name("Volume")
+            // Narrow enough that the speaker and full screen buttons keep
+            // their room at 800 px and 175% scaling (~460 DIPs).
+            .width(72.0)
             .vertical_alignment(VerticalAlignment::Center)
             .on_value_changed(context.callback(Message::Volume));
         let right = StackPanel::new()
@@ -473,7 +485,7 @@ impl Component for Player {
                 GridLength::Pixel(seek_height),
                 GridLength::Pixel(controls_height),
             ])
-            .children((title_bar.unwrap_or_else(View::empty), seek_row, controls))
+            .children((title_bar, seek_row, controls))
     }
 }
 
