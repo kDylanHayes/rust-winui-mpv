@@ -66,7 +66,7 @@ impl Player {
             return;
         }
         let Some(mpv) = &self.mpv else { return };
-        let Some(host) = VideoHost::create() else {
+        let Some(host) = VideoHost::create(mpv.clone()) else {
             self.error = Some("Couldn't find the WinUI window to embed video in".into());
             return;
         };
@@ -166,14 +166,23 @@ impl Player {
             Message::Mpv(updates) => {
                 for update in updates {
                     match update {
-                        // Key bindings inside the video (see `create_mpv`).
-                        MpvUpdate::ClientMessage(m) if m == "toggle-fullscreen" => {
-                            let fullscreen =
-                                self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
-                            self.set_fullscreen(!fullscreen);
-                        }
-                        MpvUpdate::ClientMessage(m) if m == "exit-fullscreen" => {
-                            self.set_fullscreen(false)
+                        // Input in the video window (see `video_host`).
+                        MpvUpdate::ClientMessage(args) => {
+                            match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+                                ["toggle-fullscreen"] => {
+                                    let fullscreen =
+                                        self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
+                                    self.set_fullscreen(!fullscreen);
+                                }
+                                ["exit-fullscreen"] => self.set_fullscreen(false),
+                                ["play-pause"] if self.idle => self.load(&mpv)?,
+                                ["play-pause"] => mpv.command("cycle", &["pause"])?,
+                                ["open-file", path] => {
+                                    self.file = Some(path.to_string());
+                                    self.load(&mpv)?;
+                                }
+                                _ => {}
+                            }
                         }
                         other => self.apply(other),
                     }
@@ -248,22 +257,12 @@ fn clock(seconds: f64) -> String {
 }
 
 fn create_mpv() -> libmpv2::Result<Mpv> {
+    // Embedded mpv gets no mouse or keyboard input; `video_host` handles the
+    // player keys, double-click and drag-and-drop itself.
     let mpv = Mpv::with_initializer(|init| {
-        // Let mpv's own window take keys and mouse (Space, arrows, and so on).
-        init.set_property("input-default-bindings", true)?;
-        init.set_property("input-vo-keyboard", true)?;
         init.set_property("keep-open", false)?;
         Ok(())
     })?;
-    // Embedded mpv can't resize our window, so route its fullscreen keys back
-    // to the app as script messages, which arrive as `MpvUpdate::ClientMessage`.
-    for (key, command) in [
-        ("f", "script-message toggle-fullscreen"),
-        ("MBTN_LEFT_DBL", "script-message toggle-fullscreen"),
-        ("ESC", "script-message exit-fullscreen"),
-    ] {
-        mpv.command("keybind", &[key, command])?;
-    }
     mpv_events::observe(&mpv)?;
     Ok(mpv)
 }
@@ -297,8 +296,17 @@ impl Component for Player {
 
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
         self.ensure_video_host();
+        // After a bar button, hand keyboard focus back to the video so the
+        // player keys work and Space doesn't re-press the same button.
+        let refocus = matches!(
+            message,
+            Message::OpenFile | Message::PlayPause | Message::Stop | Message::ToggleFullscreen
+        );
         if let Err(e) = self.handle(message, context) {
             self.error = Some(format!("mpv error: {e}"));
+        }
+        if refocus && let Some(video) = &self.video {
+            video.focus();
         }
     }
 
