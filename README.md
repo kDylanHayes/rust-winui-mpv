@@ -20,13 +20,18 @@ and **libmpv** for playback (via [`libmpv2`](https://crates.io/crates/libmpv2)).
 1. Install Rust (MSVC toolchain) and Visual Studio Build Tools with the C++ workload.
 2. Install the [Windows App Runtime](https://learn.microsoft.com/windows/apps/windows-app-sdk/downloads)
    (2.x), which Reactor uses by default.
-3. Get the libmpv dev files: download the latest `mpv-dev-x86_64-*.7z` from
+3. Get the libmpv dev files: download the latest `mpv-dev-x86_64-*.7z` (not the `v3` variant) from
    [shinchiro's mpv builds](https://github.com/shinchiro/mpv-winbuild-cmake/releases) and
    extract it into a `mpv/` folder at the repo root (it's gitignored). You should have
-   `mpv/libmpv-2.dll` and `mpv/mpv.def`.
-4. Create the import library MSVC needs. From a *Developer PowerShell for VS*, in `mpv/`:
+   `mpv/libmpv-2.dll`.
+4. Create the import library MSVC needs. Recent builds no longer ship `mpv.def`, so generate
+   it from the DLL's exports. From a *Developer PowerShell for VS* (x64), in `mpv/`:
 
    ```powershell
+   $names = dumpbin /exports libmpv-2.dll |
+     Select-String '^\s+\d+\s+[0-9A-F]+\s+[0-9A-F]{8}\s+(\S+)' |
+     ForEach-Object { $_.Matches[0].Groups[1].Value }
+   @('EXPORTS') + $names | Set-Content mpv.def
    lib /def:mpv.def /name:libmpv-2.dll /out:mpv.lib /MACHINE:X64
    ```
 
