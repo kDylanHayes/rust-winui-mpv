@@ -79,3 +79,61 @@ fn convert(event: Event<'_>) -> Option<MpvUpdate> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn property(name: &str, change: PropertyData<'_>) -> Option<MpvUpdate> {
+        convert(Event::PropertyChange {
+            name,
+            change,
+            reply_userdata: 0,
+        })
+    }
+
+    #[test]
+    fn converts_observed_properties() {
+        assert!(matches!(
+            property("time-pos", PropertyData::Double(1.5)),
+            Some(MpvUpdate::Position(v)) if v == 1.5
+        ));
+        assert!(matches!(
+            property("duration", PropertyData::Double(90.0)),
+            Some(MpvUpdate::Duration(v)) if v == 90.0
+        ));
+        assert!(matches!(
+            property("pause", PropertyData::Flag(true)),
+            Some(MpvUpdate::Paused(true))
+        ));
+        assert!(matches!(
+            property("idle-active", PropertyData::Flag(false)),
+            Some(MpvUpdate::Idle(false))
+        ));
+        assert!(matches!(
+            property("volume", PropertyData::Double(55.0)),
+            Some(MpvUpdate::Volume(v)) if v == 55.0
+        ));
+    }
+
+    #[test]
+    fn ignores_unknown_properties_and_mismatched_formats() {
+        assert!(property("speed", PropertyData::Double(1.0)).is_none());
+        // e.g. time-pos is unavailable while idle and arrives as None, not a number.
+        assert!(property("time-pos", PropertyData::Flag(true)).is_none());
+    }
+
+    #[test]
+    fn converts_file_loaded_and_client_messages() {
+        assert!(matches!(
+            convert(Event::FileLoaded),
+            Some(MpvUpdate::FileLoaded)
+        ));
+        assert!(matches!(
+            convert(Event::ClientMessage(vec!["toggle-fullscreen", "extra"])),
+            Some(MpvUpdate::ClientMessage(m)) if m == "toggle-fullscreen"
+        ));
+        assert!(convert(Event::ClientMessage(vec![])).is_none());
+        assert!(convert(Event::Seek).is_none());
+    }
+}

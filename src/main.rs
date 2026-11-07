@@ -369,3 +369,24 @@ impl Component for Player {
 fn main() {
     App::run_component::<Player>(()).unwrap();
 }
+
+#[cfg(test)]
+mod tests {
+    use super::clock;
+
+    #[test]
+    fn clock_formats_minutes_and_hours() {
+        assert_eq!(clock(0.0), "0:00");
+        assert_eq!(clock(59.9), "0:59");
+        assert_eq!(clock(61.0), "1:01");
+        assert_eq!(clock(3599.0), "59:59");
+        assert_eq!(clock(3600.0), "1:00:00");
+        assert_eq!(clock(3725.0), "1:02:05");
+    }
+
+    #[test]
+    fn clock_clamps_negative_and_nan_to_zero() {
+        assert_eq!(clock(-5.0), "0:00");
+        assert_eq!(clock(f64::NAN), "0:00");
+    }
+}
