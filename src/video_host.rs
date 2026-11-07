@@ -180,23 +180,25 @@ impl VideoHost {
         self.child.0 as i64
     }
 
-    /// Fills the parent's client area except for a bottom bar of `bar_dips`.
-    pub fn layout(&self, bar_dips: f64) {
+    /// Fills the parent's client area between a top inset (the title bar)
+    /// and a bottom inset (the control bar), both in DIPs.
+    pub fn layout(&self, top_dips: f64, bottom_dips: f64) {
         unsafe {
             let mut rect = RECT::default();
             if GetClientRect(self.parent, &mut rect).is_err() {
                 return;
             }
             let scale = GetDpiForWindow(self.parent) as f64 / 96.0;
-            let bar = (bar_dips * scale).round() as i32;
+            let top = (top_dips * scale).round() as i32;
+            let bottom = (bottom_dips * scale).round() as i32;
             let width = rect.right - rect.left;
-            let height = (rect.bottom - rect.top - bar).max(0);
+            let height = (rect.bottom - rect.top - top - bottom).max(0);
             // HWND_TOP keeps the video above WinUI's own content window.
             let _ = SetWindowPos(
                 self.child,
                 Some(HWND_TOP),
                 0,
-                0,
+                top,
                 width,
                 height,
                 SWP_NOACTIVATE,

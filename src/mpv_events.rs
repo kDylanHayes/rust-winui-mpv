@@ -22,6 +22,7 @@ pub enum MpvUpdate {
     Paused(bool),
     Idle(bool),
     Volume(f64),
+    Muted(bool),
     FileLoaded,
     /// A `script-message` from the video window (see `video_host`): the name,
     /// e.g. "toggle-fullscreen", followed by its arguments.
@@ -36,6 +37,7 @@ pub fn observe(mpv: &Mpv) -> libmpv2::Result<()> {
     mpv.observe_property("pause", Format::Flag, 0)?;
     mpv.observe_property("idle-active", Format::Flag, 0)?;
     mpv.observe_property("volume", Format::Double, 0)?;
+    mpv.observe_property("mute", Format::Flag, 0)?;
     Ok(())
 }
 
@@ -93,6 +95,7 @@ fn convert(event: Event<'_>) -> Option<MpvUpdate> {
             ("pause", PropertyData::Flag(v)) => Some(MpvUpdate::Paused(v)),
             ("idle-active", PropertyData::Flag(v)) => Some(MpvUpdate::Idle(v)),
             ("volume", PropertyData::Double(v)) => Some(MpvUpdate::Volume(v)),
+            ("mute", PropertyData::Flag(v)) => Some(MpvUpdate::Muted(v)),
             _ => None,
         },
         _ => None,
