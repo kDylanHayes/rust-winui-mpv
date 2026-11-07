@@ -9,9 +9,10 @@ updates:
     schedule:
       interval: "weekly"
       day: "monday"
-    # Bump Cargo.toml requirements too (not just Cargo.lock), so a new
-    # windows-reactor or libmpv2 release shows up as an explicit version change.
-    versioning-strategy: "increase"
+    # Cargo only supports "auto" or "lockfile-only". "auto" updates Cargo.lock
+    # for compatible releases and bumps Cargo.toml when a release falls outside
+    # the current requirement (e.g. windows-reactor 0.100 -> 0.101).
+    versioning-strategy: "auto"
     groups:
       # windows-reactor and its windows-* support crates release in lockstep.
       windows-rs:
