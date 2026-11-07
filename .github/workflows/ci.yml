@@ -54,7 +54,7 @@ jobs:
           "url=$($asset.url)" >> $env:GITHUB_OUTPUT
           Write-Host "Using $($asset.name)"
 
-      - uses: actions/cache@v4
+      - uses: actions/cache@v6
         id: mpv-cache
         with:
           path: mpv
