@@ -1,0 +1,31 @@
+# Keeps dependencies on their latest releases.
+# Dependabot opens a PR when a new version appears; nothing merges without review,
+# because CI can't build this Windows-only app and windows-reactor 0.x releases
+# often change APIs (e.g. 0.100 -> 0.101).
+version: 2
+updates:
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    # Bump Cargo.toml requirements too (not just Cargo.lock), so a new
+    # windows-reactor or libmpv2 release shows up as an explicit version change.
+    versioning-strategy: "increase"
+    groups:
+      # windows-reactor and its windows-* support crates release in lockstep.
+      windows-rs:
+        patterns:
+          - "windows*"
+      # Everything else that's semver-compatible lands in one PR.
+      minor-and-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    open-pull-requests-limit: 5
+
+  # Keeps any future GitHub Actions workflows current as well.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
