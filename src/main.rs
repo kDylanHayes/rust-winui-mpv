@@ -17,8 +17,11 @@ use mpv_events::MpvUpdate;
 use video_host::VideoHost;
 use windows_reactor::*;
 
-/// Height of the control bar under the video, in device-independent pixels.
-const BAR_DIPS: f64 = 56.0;
+/// Height of the seek row and the controls row under the video, in
+/// device-independent pixels.
+const SEEK_DIPS: f64 = 32.0;
+const CONTROLS_DIPS: f64 = 48.0;
+const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
 
 #[derive(Clone)]
 enum Message {
@@ -43,6 +46,8 @@ struct Player {
     position: f64,
     duration: f64,
     volume: f64,
+    /// Play the file from the command line once the video window exists.
+    autoplay: bool,
 }
 
 impl Player {
@@ -64,6 +69,11 @@ impl Player {
         }
         host.layout(BAR_DIPS);
         self.video = Some(host);
+        if std::mem::take(&mut self.autoplay)
+            && let Err(e) = self.load(mpv.clone().as_ref())
+        {
+            self.error = Some(format!("mpv error: {e}"));
+        }
     }
 
     fn bar_dips(&self) -> f64 {
@@ -78,11 +88,6 @@ impl Player {
         if let Some(video) = &mut self.video {
             video.set_fullscreen(fullscreen);
             video.layout(bar);
-        }
-        // Keep mpv's property in step, so toggling from the button and from
-        // inside the video (double-click, f, Esc) agree.
-        if let Some(mpv) = &self.mpv {
-            let _ = mpv.set_property("fullscreen", fullscreen);
         }
     }
 
@@ -136,14 +141,17 @@ impl Player {
             }
             Message::Mpv(updates) => {
                 for update in updates {
-                    self.apply(update);
-                }
-                // Mirror mpv's own fullscreen toggle (double-click, f, Esc
-                // inside the video) onto the window.
-                if let Ok(fullscreen) = mpv.get_property::<bool>("fullscreen") {
-                    let current = self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
-                    if fullscreen != current {
-                        self.set_fullscreen(fullscreen);
+                    match update {
+                        // Key bindings inside the video (see `create_mpv`).
+                        MpvUpdate::ClientMessage(m) if m == "toggle-fullscreen" => {
+                            let fullscreen =
+                                self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
+                            self.set_fullscreen(!fullscreen);
+                        }
+                        MpvUpdate::ClientMessage(m) if m == "exit-fullscreen" => {
+                            self.set_fullscreen(false)
+                        }
+                        other => self.apply(other),
                     }
                 }
                 self.poll_events(context);
@@ -167,6 +175,7 @@ impl Player {
                 }
             }
             MpvUpdate::Error(e) => self.error = Some(e),
+            MpvUpdate::ClientMessage(_) => {}
         }
     }
 
@@ -210,15 +219,22 @@ fn clock(seconds: f64) -> String {
 
 fn create_mpv() -> libmpv2::Result<Mpv> {
     let mpv = Mpv::with_initializer(|init| {
-        // Let mpv's own window take keys and mouse: Space, arrows, f,
-        // double-click for fullscreen, and so on.
+        // Let mpv's own window take keys and mouse (Space, arrows, and so on).
         init.set_property("input-default-bindings", true)?;
         init.set_property("input-vo-keyboard", true)?;
         init.set_property("keep-open", false)?;
         Ok(())
     })?;
+    // Embedded mpv can't resize our window, so route its fullscreen keys back
+    // to the app as script messages, which arrive as `MpvUpdate::ClientMessage`.
+    for (key, command) in [
+        ("f", "script-message toggle-fullscreen"),
+        ("MBTN_LEFT_DBL", "script-message toggle-fullscreen"),
+        ("ESC", "script-message exit-fullscreen"),
+    ] {
+        mpv.command("keybind", &[key, command])?;
+    }
     mpv_events::observe(&mpv)?;
-    mpv.observe_property("fullscreen", libmpv2::Format::Flag, 0)?;
     Ok(mpv)
 }
 
@@ -231,10 +247,12 @@ impl Component for Player {
             Ok(mpv) => (Some(Arc::new(mpv)), None),
             Err(e) => (None, Some(format!("Failed to start mpv: {e}"))),
         };
+        let file = std::env::args().nth(1);
         let player = Self {
             mpv,
             video: None,
-            file: std::env::args().nth(1),
+            autoplay: file.is_some(),
+            file,
             error,
             idle: true,
             paused: false,
@@ -288,26 +306,27 @@ impl Component for Player {
             .step_frequency(1.0)
             .is_enabled(!self.idle && self.duration > 0.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(1)
+            .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
+            .grid_row(1)
             .on_value_changed(context.callback(Message::Seek));
 
         let status = TextBlock::new()
             .text(self.status())
             .text_trimming(TextTrimming::CharacterEllipsis)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(2);
+            .grid_column(1);
 
         let volume = Slider::new()
             .minimum(0.0)
             .maximum(100.0)
             .value(self.volume)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(3)
+            .grid_column(2)
             .on_value_changed(context.callback(Message::Volume));
 
         let fullscreen_button = Button::new()
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(4)
+            .grid_column(3)
             .on_click(context.message(Message::ToggleFullscreen))
             .content(if fullscreen {
                 "Exit fullscreen"
@@ -317,23 +336,33 @@ impl Component for Player {
 
         let bar = Grid::new()
             .column_spacing(12.0)
+            // The status column takes what's left and trims, so the buttons
+            // and volume always fit; the seek bar has its own full-width row.
             .columns([
                 GridLength::Auto,
                 GridLength::Star(1.0),
-                GridLength::Pixel(220.0),
                 GridLength::Pixel(110.0),
                 GridLength::Auto,
             ])
             .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
-            .grid_row(1)
-            .children((buttons, seek, status, volume, fullscreen_button));
+            .grid_row(2)
+            .children((buttons, status, volume, fullscreen_button));
 
         // Row 0 is left empty: the native video window sits over it. In
-        // fullscreen the bar row collapses so video fills the screen.
-        let bar_height = if fullscreen { 0.0 } else { BAR_DIPS };
+        // fullscreen the seek and control rows collapse so video fills the
+        // screen.
+        let (seek_height, controls_height) = if fullscreen {
+            (0.0, 0.0)
+        } else {
+            (SEEK_DIPS, CONTROLS_DIPS)
+        };
         Grid::new()
-            .rows([GridLength::Star(1.0), GridLength::Pixel(bar_height)])
-            .children((bar,))
+            .rows([
+                GridLength::Star(1.0),
+                GridLength::Pixel(seek_height),
+                GridLength::Pixel(controls_height),
+            ])
+            .children((seek, bar))
     }
 }
 

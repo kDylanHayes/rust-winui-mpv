@@ -17,10 +17,10 @@ use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, EnumThreadWindows, GWL_STYLE, GetClassNameW, GetClientRect, GetParent,
-    GetWindowLongPtrW, GetWindowPlacement, HWND_TOP, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE,
-    SWP_NOOWNERZORDER, SWP_NOSIZE, SWP_NOZORDER, SetWindowLongPtrW, SetWindowPlacement,
-    SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW,
-    WS_VISIBLE,
+    GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{BOOL, w};
 
@@ -100,9 +100,10 @@ impl VideoHost {
                     style & !(WS_OVERLAPPEDWINDOW.0 as isize),
                 );
                 let r = monitor.rcMonitor;
+                // Topmost, or the taskbar stays drawn over the video.
                 let _ = SetWindowPos(
                     self.parent,
-                    Some(HWND_TOP),
+                    Some(HWND_TOPMOST),
                     r.left,
                     r.top,
                     r.right - r.left,
@@ -115,12 +116,12 @@ impl VideoHost {
                 let _ = SetWindowPlacement(self.parent, &placement);
                 let _ = SetWindowPos(
                     self.parent,
-                    None,
+                    Some(HWND_NOTOPMOST),
                     0,
                     0,
                     0,
                     0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
                 );
             }
         }

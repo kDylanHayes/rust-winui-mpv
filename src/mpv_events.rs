@@ -23,6 +23,8 @@ pub enum MpvUpdate {
     Idle(bool),
     Volume(f64),
     FileLoaded,
+    /// A `script-message` from a key binding, e.g. "toggle-fullscreen".
+    ClientMessage(String),
     Error(String),
 }
 
@@ -63,6 +65,9 @@ pub fn next_batch(mpv: &Arc<Mpv>, cancelled: impl Fn() -> bool) -> Vec<MpvUpdate
 fn convert(event: Event<'_>) -> Option<MpvUpdate> {
     match event {
         Event::FileLoaded => Some(MpvUpdate::FileLoaded),
+        Event::ClientMessage(args) => args
+            .first()
+            .map(|m| MpvUpdate::ClientMessage(m.to_string())),
         Event::PropertyChange { name, change, .. } => match (name, change) {
             ("time-pos", PropertyData::Double(v)) => Some(MpvUpdate::Position(v)),
             ("duration", PropertyData::Double(v)) => Some(MpvUpdate::Duration(v)),
