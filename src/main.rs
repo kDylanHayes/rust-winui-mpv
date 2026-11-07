@@ -8,12 +8,14 @@
 
 mod file_dialog;
 mod mpv_events;
+mod tracks;
 mod video_host;
 
 use std::sync::Arc;
 
 use libmpv2::Mpv;
 use mpv_events::MpvUpdate;
+use tracks::Tracks;
 use video_host::VideoHost;
 use windows_reactor::*;
 
@@ -22,6 +24,8 @@ use windows_reactor::*;
 const SEEK_DIPS: f64 = 32.0;
 const CONTROLS_DIPS: f64 = 48.0;
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
+/// Width of the audio and subtitle pickers.
+const TRACK_PICKER_DIPS: f64 = 140.0;
 
 #[derive(Clone)]
 enum Message {
@@ -31,6 +35,8 @@ enum Message {
     Seek(f64),
     Volume(f64),
     ToggleFullscreen,
+    AudioTrack(Option<usize>),
+    SubtitleTrack(Option<usize>),
     Resized,
     Mpv(Vec<MpvUpdate>),
 }
@@ -46,6 +52,7 @@ struct Player {
     position: f64,
     duration: f64,
     volume: f64,
+    tracks: Tracks,
     /// Play the file from the command line once the video window exists.
     autoplay: bool,
 }
@@ -134,6 +141,23 @@ impl Player {
                 let fullscreen = self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
                 self.set_fullscreen(!fullscreen);
             }
+            Message::AudioTrack(Some(i)) => {
+                if let Some(track) = self.tracks.audio.get(i) {
+                    mpv.set_property("aid", track.id)?;
+                    self.tracks = Tracks::load(&mpv);
+                }
+            }
+            Message::SubtitleTrack(Some(0)) => {
+                mpv.set_property("sid", "no")?;
+                self.tracks = Tracks::load(&mpv);
+            }
+            Message::SubtitleTrack(Some(i)) => {
+                if let Some(track) = self.tracks.subtitles.get(i - 1) {
+                    mpv.set_property("sid", track.id)?;
+                    self.tracks = Tracks::load(&mpv);
+                }
+            }
+            Message::AudioTrack(None) | Message::SubtitleTrack(None) => {}
             Message::Resized => {
                 if let Some(video) = &self.video {
                     video.layout(self.bar_dips());
@@ -166,12 +190,18 @@ impl Player {
             MpvUpdate::Duration(v) => self.duration = v,
             MpvUpdate::Paused(v) => self.paused = v,
             MpvUpdate::Volume(v) => self.volume = v,
-            MpvUpdate::FileLoaded => self.error = None,
+            MpvUpdate::FileLoaded => {
+                self.error = None;
+                if let Some(mpv) = &self.mpv {
+                    self.tracks = Tracks::load(mpv);
+                }
+            }
             MpvUpdate::Idle(v) => {
                 self.idle = v;
                 if v {
                     self.position = 0.0;
                     self.duration = 0.0;
+                    self.tracks = Tracks::default();
                 }
             }
             MpvUpdate::Error(e) => self.error = Some(e),
@@ -259,6 +289,7 @@ impl Component for Player {
             position: 0.0,
             duration: 0.0,
             volume: 100.0,
+            tracks: Tracks::default(),
         };
         player.poll_events(context);
         player
@@ -273,6 +304,7 @@ impl Component for Player {
 
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
         context.window_title("rust-winui-mpv");
+        context.window_visuals(WindowVisuals::new().backdrop(WindowBackdrop::Mica));
         context.on_window_size(context.callback(|_: WindowSize| Message::Resized));
 
         let fullscreen = self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
@@ -310,23 +342,43 @@ impl Component for Player {
             .grid_row(1)
             .on_value_changed(context.callback(Message::Seek));
 
+        let audio = ComboBox::new()
+            .placeholder_text("Audio")
+            .items_source(self.tracks.audio.iter().map(|t| t.label.clone()))
+            .selected_index(self.tracks.audio_index())
+            .is_enabled(!self.tracks.audio.is_empty())
+            .width(TRACK_PICKER_DIPS)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(1)
+            .on_selection_changed(context.callback(Message::AudioTrack));
+
+        let subtitles = ComboBox::new()
+            .placeholder_text("Subtitles")
+            .items_source(self.tracks.subtitle_labels())
+            .selected_index(self.tracks.subtitle_index())
+            .is_enabled(!self.tracks.subtitles.is_empty())
+            .width(TRACK_PICKER_DIPS)
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(2)
+            .on_selection_changed(context.callback(Message::SubtitleTrack));
+
         let status = TextBlock::new()
             .text(self.status())
             .text_trimming(TextTrimming::CharacterEllipsis)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(1);
+            .grid_column(3);
 
         let volume = Slider::new()
             .minimum(0.0)
             .maximum(100.0)
             .value(self.volume)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(2)
+            .grid_column(4)
             .on_value_changed(context.callback(Message::Volume));
 
         let fullscreen_button = Button::new()
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(3)
+            .grid_column(5)
             .on_click(context.message(Message::ToggleFullscreen))
             .content(if fullscreen {
                 "Exit fullscreen"
@@ -340,13 +392,15 @@ impl Component for Player {
             // and volume always fit; the seek bar has its own full-width row.
             .columns([
                 GridLength::Auto,
+                GridLength::Auto,
+                GridLength::Auto,
                 GridLength::Star(1.0),
                 GridLength::Pixel(110.0),
                 GridLength::Auto,
             ])
             .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
             .grid_row(2)
-            .children((buttons, status, volume, fullscreen_button));
+            .children((buttons, audio, subtitles, status, volume, fullscreen_button));
 
         // Row 0 is left empty: the native video window sits over it. In
         // fullscreen the seek and control rows collapse so video fills the
