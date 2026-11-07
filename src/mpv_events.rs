@@ -131,8 +131,8 @@ mod tests {
             Some(MpvUpdate::FileLoaded)
         ));
         assert!(matches!(
-            convert(Event::ClientMessage(vec!["toggle-fullscreen", "extra"])),
-            Some(MpvUpdate::ClientMessage(m)) if m == "toggle-fullscreen"
+            convert(Event::ClientMessage(vec!["open-file", "C:\\a b.mkv"])),
+            Some(MpvUpdate::ClientMessage(args)) if args == ["open-file", "C:\\a b.mkv"]
         ));
         assert!(convert(Event::ClientMessage(vec![])).is_none());
         assert!(convert(Event::Seek).is_none());

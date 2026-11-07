@@ -110,15 +110,15 @@ fn reports_pause_and_volume_changes() {
 
 #[test]
 fn forwards_key_binding_script_messages() {
-    // The app binds keys like `f` to `script-message toggle-fullscreen` and
-    // expects them back as ClientMessage. Send the same command directly.
+    // The video window sends `script-message toggle-fullscreen` (and
+    // `open-file <path>`) through mpv and expects them back as ClientMessage.
     let mpv = headless_mpv();
     mpv.command("script-message", &["toggle-fullscreen"])
         .unwrap();
     wait_for(
         &mpv,
         "ClientMessage(toggle-fullscreen)",
-        |u| matches!(u, MpvUpdate::ClientMessage(m) if m == "toggle-fullscreen"),
+        |u| matches!(u, MpvUpdate::ClientMessage(args) if *args == ["toggle-fullscreen"]),
     );
 }
 

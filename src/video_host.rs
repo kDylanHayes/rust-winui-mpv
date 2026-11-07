@@ -34,9 +34,9 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, GWL_STYLE, GWLP_USERDATA,
-    GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement,
-    HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
+    GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST,
+    HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
     SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN,
     WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
@@ -260,7 +260,11 @@ fn on_key(mpv: &Mpv, key: u16, repeat: bool) -> bool {
         k if k == VK_LEFT.0 => mpv.command("seek", &[&format!("-{SEEK_STEP}"), "relative"]),
         k if k == VK_RIGHT.0 => mpv.command("seek", &[SEEK_STEP, "relative"]),
         k if k == VK_UP.0 || k == VK_DOWN.0 => {
-            let step = if k == VK_UP.0 { VOLUME_STEP } else { -VOLUME_STEP };
+            let step = if k == VK_UP.0 {
+                VOLUME_STEP
+            } else {
+                -VOLUME_STEP
+            };
             let volume = mpv.get_property::<f64>("volume").unwrap_or(100.0);
             // The volume slider tops out at 100, so keep mpv there too.
             mpv.set_property("volume", (volume + step).clamp(0.0, 100.0))
