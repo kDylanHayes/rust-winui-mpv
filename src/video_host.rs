@@ -1,30 +1,54 @@
 //! A native child window inside the WinUI window that mpv renders into.
 //!
 //! windows-reactor 0.100 doesn't expose its window handle, so we find our own
-//! top-level WinUI window on the UI thread, then create a plain child window
-//! over the video area and hand its handle to mpv via the `wid` option.
-//! WinUI content can't draw over this child (the "airspace" limit), so the
-//! controls live in a bar below it.
+//! top-level WinUI window on the UI thread, then create a child window over the
+//! video area and hand its handle to mpv via the `wid` option. WinUI content
+//! can't draw over this child (the "airspace" limit), so the controls live in a
+//! bar below it.
+//!
+//! Embedded mpv doesn't take mouse or keyboard input (clicks fall through its
+//! window to ours, and focus stays with WinUI), so this window handles input
+//! itself: it takes focus when clicked, handles player keys and double-click,
+//! and accepts dropped files. Simple playback commands go straight to mpv;
+//! actions the app owns (fullscreen, play/pause, opening a file) are sent as
+//! mpv `script-message`s, which come back through the event pump as
+//! `MpvUpdate::ClientMessage`.
 //!
 //! Fullscreen uses the classic Win32 approach on the WinUI window: drop the
 //! frame styles and cover the monitor, then restore the saved placement.
 
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use std::sync::{Arc, Once};
+
+use libmpv2::Mpv;
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    BLACK_BRUSH, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow,
 };
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::UI::Input::KeyboardAndMouse::{
+    SetFocus, VK_DOWN, VK_ESCAPE, VK_F, VK_LEFT, VK_M, VK_RIGHT, VK_SPACE, VK_UP,
+};
+use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, EnumThreadWindows, GWL_STYLE, GetClassNameW, GetClientRect, GetParent,
-    GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WS_CHILD, WS_CLIPSIBLINGS,
+    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, GWL_STYLE, GWLP_USERDATA,
+    GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST,
+    HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW, SWP_FRAMECHANGED,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
-use windows::core::{BOOL, w};
+use windows::core::{BOOL, PCWSTR, w};
 
 const WINUI_WINDOW_CLASS: &str = "WinUIDesktopWin32WindowClass";
+const HOST_CLASS: PCWSTR = w!("RustWinUiMpvVideoHost");
+
+/// Seconds the arrow keys seek by, and the volume step for Up/Down.
+const SEEK_STEP: &str = "5";
+const VOLUME_STEP: f64 = 5.0;
 
 pub struct VideoHost {
     parent: HWND,
@@ -35,15 +59,27 @@ pub struct VideoHost {
 
 impl VideoHost {
     /// Creates the child window. Call on the UI thread after the window exists.
-    pub fn create() -> Option<Self> {
+    pub fn create(mpv: Arc<Mpv>) -> Option<Self> {
         let parent = find_own_winui_window()?;
         let child = unsafe {
-            CreateWindowExW(
+            let instance = GetModuleHandleW(None).ok()?;
+            static REGISTER: Once = Once::new();
+            REGISTER.call_once(|| {
+                let class = WNDCLASSW {
+                    style: CS_DBLCLKS,
+                    lpfnWndProc: Some(host_proc),
+                    hInstance: instance.into(),
+                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
+                    lpszClassName: HOST_CLASS,
+                    ..Default::default()
+                };
+                RegisterClassW(&class);
+            });
+            let child = CreateWindowExW(
                 WINDOW_EX_STYLE(0),
-                w!("STATIC"),
+                HOST_CLASS,
                 w!(""),
-                // Left enabled: mpv creates its own window inside this one and
-                // handles mouse and keyboard input there.
                 WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
                 0,
                 0,
@@ -51,10 +87,14 @@ impl VideoHost {
                 0,
                 Some(parent),
                 None,
-                None,
+                Some(instance.into()),
                 None,
             )
-            .ok()?
+            .ok()?;
+            // Owned by the window from here on; released in WM_NCDESTROY.
+            SetWindowLongPtrW(child, GWLP_USERDATA, Arc::into_raw(mpv) as isize);
+            DragAcceptFiles(child, true);
+            child
         };
         Some(Self {
             parent,
@@ -66,6 +106,14 @@ impl VideoHost {
     /// The WinUI top-level window, e.g. to own dialogs.
     pub fn window(&self) -> HWND {
         self.parent
+    }
+
+    /// Gives the video keyboard focus, so player keys work and Space doesn't
+    /// re-press whichever WinUI button was clicked last.
+    pub fn focus(&self) {
+        unsafe {
+            let _ = SetFocus(Some(self.child));
+        }
     }
 
     pub fn is_fullscreen(&self) -> bool {
@@ -155,6 +203,83 @@ impl VideoHost {
             );
         }
     }
+}
+
+/// Window procedure for the video host: player keys, double-click, and drops.
+unsafe extern "system" fn host_proc(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    let mpv_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Mpv;
+    if msg == WM_NCDESTROY && !mpv_ptr.is_null() {
+        unsafe {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            drop(Arc::from_raw(mpv_ptr));
+        }
+    } else if let Some(mpv) = unsafe { mpv_ptr.as_ref() } {
+        let handled = match msg {
+            WM_LBUTTONDOWN => {
+                let _ = unsafe { SetFocus(Some(hwnd)) };
+                true
+            }
+            WM_LBUTTONDBLCLK => {
+                let _ = app_message(mpv, &["toggle-fullscreen"]);
+                true
+            }
+            WM_KEYDOWN => on_key(mpv, wparam.0 as u16, lparam.0 & (1 << 30) != 0),
+            WM_DROPFILES => {
+                let drop = HDROP(wparam.0 as _);
+                let mut path = vec![0u16; 32768];
+                let len = unsafe { DragQueryFileW(drop, 0, Some(&mut path)) } as usize;
+                unsafe { DragFinish(drop) };
+                if len > 0 {
+                    let path = String::from_utf16_lossy(&path[..len]);
+                    let _ = app_message(mpv, &["open-file", &path]);
+                }
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            return LRESULT(0);
+        }
+    }
+    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// Handles a key press in the video and returns whether it was a player key.
+/// `repeat` is set for auto-repeat, which only seek and volume act on.
+fn on_key(mpv: &Mpv, key: u16, repeat: bool) -> bool {
+    let result = match key {
+        k if k == VK_SPACE.0 && !repeat => app_message(mpv, &["play-pause"]),
+        k if k == VK_F.0 && !repeat => app_message(mpv, &["toggle-fullscreen"]),
+        k if k == VK_ESCAPE.0 && !repeat => app_message(mpv, &["exit-fullscreen"]),
+        k if k == VK_M.0 && !repeat => mpv.command("cycle", &["mute"]),
+        k if k == VK_LEFT.0 => mpv.command("seek", &[&format!("-{SEEK_STEP}"), "relative"]),
+        k if k == VK_RIGHT.0 => mpv.command("seek", &[SEEK_STEP, "relative"]),
+        k if k == VK_UP.0 || k == VK_DOWN.0 => {
+            let step = if k == VK_UP.0 {
+                VOLUME_STEP
+            } else {
+                -VOLUME_STEP
+            };
+            let volume = mpv.get_property::<f64>("volume").unwrap_or(100.0);
+            // The volume slider tops out at 100, so keep mpv there too.
+            mpv.set_property("volume", (volume + step).clamp(0.0, 100.0))
+        }
+        k if k == VK_SPACE.0 || k == VK_F.0 || k == VK_ESCAPE.0 || k == VK_M.0 => Ok(()),
+        _ => return false,
+    };
+    // Seeking with nothing loaded fails harmlessly; there's nothing to report.
+    let _ = result;
+    true
+}
+
+/// Asks the app to do something it owns. Arrives as `MpvUpdate::ClientMessage`.
+fn app_message(mpv: &Mpv, args: &[&str]) -> libmpv2::Result<()> {
+    mpv.command("script-message", args)
 }
 
 fn find_own_winui_window() -> Option<HWND> {
