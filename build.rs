@@ -3,10 +3,17 @@
 //!
 //! Expects the files described in README.md under `./mpv`, or wherever the
 //! `MPV_DIR` environment variable points.
+//!
+//! Also embeds assets/app.rc, which gives the exe its icon.
 
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    // Compiles only when targeting Windows; elsewhere this does nothing.
+    embed_resource::compile("assets/app.rc", embed_resource::NONE)
+        .manifest_optional()
+        .unwrap();
+
     println!("cargo:rerun-if-env-changed=MPV_DIR");
     let manifest = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let mpv_dir = env::var_os("MPV_DIR")
