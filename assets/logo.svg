@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-labelledby="t">
+  <title id="t">rust-winui-mpv logo: the letters DH with a purple play button over them</title>
+  <defs>
+    <path id="tri" d="M150 104V408L424 256Z" stroke-linejoin="round"/>
+    <clipPath id="triClip"><use href="#tri"/></clipPath>
+    <g id="letters" fill-rule="evenodd">
+      <path d="M80 136H144A96 120 0 0 1 144 376H80Z M128 184H144A48 72 0 0 1 144 328H128Z"/>
+      <path d="M272 136h48v96h56V136h48v240h-48V280h-56v96h-48Z"/>
+    </g>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="#17121f"/>
+  <use href="#tri" fill="#8b5cf6" stroke="#8b5cf6" stroke-width="24"/>
+  <use href="#letters" fill="#f3effb"/>
+  <g clip-path="url(#triClip)"><use href="#letters" fill="#17121f"/></g>
+</svg>

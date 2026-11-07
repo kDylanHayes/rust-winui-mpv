@@ -6,6 +6,7 @@
 //! property changes arrive as messages (see `mpv_events`), so the UI always
 //! reflects what mpv is actually doing.
 
+mod app_icon;
 mod file_dialog;
 mod mpv_events;
 mod tracks;
@@ -68,6 +69,7 @@ impl Player {
             self.error = Some("Couldn't find the WinUI window to embed video in".into());
             return;
         };
+        app_icon::apply(host.window());
         if let Err(e) = mpv.set_property("wid", host.wid()) {
             self.error = Some(format!("mpv rejected wid: {e}"));
             return;
