@@ -21,7 +21,7 @@ use windows_reactor::*;
 
 /// Height of the seek row and the controls row under the video, in
 /// device-independent pixels.
-const SEEK_DIPS: f64 = 32.0;
+const SEEK_DIPS: f64 = 40.0;
 const CONTROLS_DIPS: f64 = 48.0;
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
 
@@ -333,8 +333,7 @@ impl Component for Player {
             .step_frequency(1.0)
             .is_enabled(!self.idle && self.duration > 0.0)
             .vertical_alignment(VerticalAlignment::Center)
-            .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
-            .grid_row(1)
+            .grid_column(0)
             .on_value_changed(context.callback(Message::Seek));
 
         // A MenuFlyout on a button rather than two ComboBoxes: it fits narrow
@@ -361,12 +360,12 @@ impl Component for Player {
             .maximum(100.0)
             .value(self.volume)
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(3)
+            .grid_column(1)
             .on_value_changed(context.callback(Message::Volume));
 
         let fullscreen_button = Button::new()
             .vertical_alignment(VerticalAlignment::Center)
-            .grid_column(4)
+            .grid_column(2)
             .on_click(context.message(Message::ToggleFullscreen))
             .content(if fullscreen {
                 "Exit fullscreen"
@@ -374,20 +373,27 @@ impl Component for Player {
                 "Fullscreen"
             });
 
-        let bar = Grid::new()
+        // Seek, volume and fullscreen share the upper row; the buttons and
+        // the status text (which takes what's left and trims) the lower one.
+        // At 175% scaling an 800 px window is only ~460 DIPs wide, so nothing
+        // fixed-width may end up after the status column.
+        let seek_row = Grid::new()
             .column_spacing(12.0)
-            // The status column takes what's left and trims, so the buttons
-            // and volume always fit; the seek bar has its own full-width row.
             .columns([
-                GridLength::Auto,
-                GridLength::Auto,
                 GridLength::Star(1.0),
-                GridLength::Pixel(110.0),
+                GridLength::Pixel(100.0),
                 GridLength::Auto,
             ])
             .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
+            .grid_row(1)
+            .children((seek, volume, fullscreen_button));
+
+        let bar = Grid::new()
+            .column_spacing(12.0)
+            .columns([GridLength::Auto, GridLength::Auto, GridLength::Star(1.0)])
+            .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
             .grid_row(2)
-            .children((buttons, tracks_button, status, volume, fullscreen_button));
+            .children((buttons, tracks_button, status));
 
         // Row 0 is left empty: the native video window sits over it. In
         // fullscreen the seek and control rows collapse so video fills the
@@ -403,7 +409,7 @@ impl Component for Player {
                 GridLength::Pixel(seek_height),
                 GridLength::Pixel(controls_height),
             ])
-            .children((seek, bar))
+            .children((seek_row, bar))
     }
 }
 
