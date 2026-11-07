@@ -43,3 +43,20 @@ and **libmpv** for playback (via [`libmpv2`](https://crates.io/crates/libmpv2)).
 
 The build script links against `mpv/mpv.lib` and copies `libmpv-2.dll` next to the exe.
 To keep the mpv files elsewhere, set `MPV_DIR` to that folder.
+
+## Tests and CI
+
+```powershell
+cargo test
+```
+
+- Unit tests sit next to the code they cover (for example `mpv_events::convert` and `clock`).
+- `tests/mpv_headless.rs` runs real libmpv with `vo=null`/`ao=null` on a generated lavfi
+  test pattern, and checks that `src/mpv_events.rs` reports loading, position, pause, volume,
+  end of file and key-binding script messages. Test executables run from `target/debug/deps`,
+  so put your `mpv/` folder on `PATH` first (`$env:PATH = "$PWD\mpv;$env:PATH"`).
+
+GitHub Actions (`.github/workflows/ci.yml`) does the same on `windows-latest` for every push and
+pull request: it downloads the latest shinchiro mpv dev build, generates `mpv.lib` as above, then
+runs `cargo fmt --check`, `cargo clippy -D warnings`, `cargo build` and `cargo test`. It can't
+check the WinUI window itself, so UI changes still need a local run.
