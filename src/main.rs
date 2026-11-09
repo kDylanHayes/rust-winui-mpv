@@ -10,10 +10,12 @@ mod app_icon;
 mod file_dialog;
 mod glyph;
 mod mpv_events;
+mod playlist;
 mod tracks;
 mod video_host;
 
 use std::sync::Arc;
+use std::time::Instant;
 
 use libmpv2::Mpv;
 use mpv_events::MpvUpdate;
@@ -21,12 +23,13 @@ use tracks::Tracks;
 use video_host::VideoHost;
 use windows_reactor::*;
 
-/// Height of the seek row and the controls row under the video, in
-/// device-independent pixels.
-/// Height of the custom title bar (WinUI's "tall" title bar).
-const TITLE_DIPS: f64 = 48.0;
-const SEEK_DIPS: f64 = 40.0;
-const CONTROLS_DIPS: f64 = 56.0;
+/// Heights in device-independent pixels: the title bar (WinUI's standard
+/// height), then the seek row and the controls row under the video.
+const TITLE_DIPS: f64 = 32.0;
+const SEEK_DIPS: f64 = 30.0;
+const CONTROLS_DIPS: f64 = 44.0;
+/// How long the controls stay up in fullscreen after the pointer stops.
+const CONTROLS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
 
 #[derive(Clone)]
@@ -38,6 +41,10 @@ enum Message {
     Volume(f64),
     ToggleFullscreen,
     ToggleMute,
+    Previous,
+    Next,
+    /// Fullscreen controls timer: hide them if the pointer has been still.
+    HideControlsCheck,
     /// A pick from the Tracks menu, identified by its label.
     TrackMenu(String),
     Resized,
@@ -56,7 +63,15 @@ struct Player {
     duration: f64,
     volume: f64,
     muted: bool,
+    playlist_pos: i64,
+    playlist_count: i64,
     tracks: Tracks,
+    /// Fullscreen only: whether the seek and control rows are showing, when
+    /// the pointer last moved over the video, and whether a hide check is
+    /// already scheduled.
+    controls_shown: bool,
+    last_pointer: Instant,
+    hide_pending: bool,
     /// Play the file from the command line once the video window exists.
     autoplay: bool,
 }
@@ -88,21 +103,75 @@ impl Player {
         }
     }
 
-    /// Space above and below the video: title bar and control bar, or none
-    /// in fullscreen.
-    fn insets(fullscreen: bool) -> (f64, f64) {
-        if fullscreen {
-            (0.0, 0.0)
-        } else {
-            (TITLE_DIPS, BAR_DIPS)
+    fn is_fullscreen(&self) -> bool {
+        self.video.as_ref().is_some_and(VideoHost::is_fullscreen)
+    }
+
+    /// Heights of the title row and the seek/control rows. Windowed: both.
+    /// Fullscreen: the control rows only while `controls_shown`.
+    fn chrome(&self) -> (f64, f64) {
+        match (self.is_fullscreen(), self.controls_shown) {
+            (false, _) => (TITLE_DIPS, BAR_DIPS),
+            (true, true) => (0.0, BAR_DIPS),
+            (true, false) => (0.0, 0.0),
+        }
+    }
+
+    fn relayout(&self) {
+        if let Some(video) = &self.video {
+            let (top, bottom) = self.chrome();
+            video.layout(top, bottom);
         }
     }
 
     fn set_fullscreen(&mut self, fullscreen: bool) {
-        let (top, bottom) = Self::insets(fullscreen);
+        self.controls_shown = false;
         if let Some(video) = &mut self.video {
             video.set_fullscreen(fullscreen);
-            video.layout(top, bottom);
+        }
+        self.relayout();
+    }
+
+    /// Fullscreen: the pointer moved over the video, so show the controls
+    /// and (re)start the timer that hides them again.
+    fn pointer_moved(&mut self, context: &ComponentContext<Self>) {
+        if !self.is_fullscreen() {
+            return;
+        }
+        self.last_pointer = Instant::now();
+        if !self.controls_shown {
+            self.controls_shown = true;
+            self.relayout();
+        }
+        self.schedule_hide(context);
+    }
+
+    fn schedule_hide(&mut self, context: &ComponentContext<Self>) {
+        if std::mem::replace(&mut self.hide_pending, true) {
+            return;
+        }
+        let wait = CONTROLS_TIMEOUT.saturating_sub(self.last_pointer.elapsed());
+        context.spawn_background(move |_| {
+            std::thread::sleep(wait);
+            Message::HideControlsCheck
+        });
+    }
+
+    fn hide_controls_check(&mut self, context: &ComponentContext<Self>) {
+        self.hide_pending = false;
+        if !self.is_fullscreen() || !self.controls_shown {
+            return;
+        }
+        let over_controls = self.video.as_ref().is_some_and(|v| !v.cursor_over_video());
+        if over_controls || self.last_pointer.elapsed() < CONTROLS_TIMEOUT {
+            // Still in use: check again later.
+            if over_controls {
+                self.last_pointer = Instant::now();
+            }
+            self.schedule_hide(context);
+        } else {
+            self.controls_shown = false;
+            self.relayout();
         }
     }
 
@@ -111,7 +180,7 @@ impl Player {
             return Ok(());
         };
         mpv.set_property("pause", false)?;
-        mpv.command("loadfile", &[file.as_str()])
+        playlist::play(mpv, file)
     }
 
     fn handle(
@@ -156,12 +225,10 @@ impl Player {
                     self.tracks = Tracks::load(&mpv);
                 }
             }
-            Message::Resized => {
-                if let Some(video) = &self.video {
-                    let (top, bottom) = Self::insets(video.is_fullscreen());
-                    video.layout(top, bottom);
-                }
-            }
+            Message::Previous => mpv.command("playlist-prev", &[])?,
+            Message::Next => mpv.command("playlist-next", &[])?,
+            Message::HideControlsCheck => self.hide_controls_check(context),
+            Message::Resized => self.relayout(),
             Message::Mpv(updates) => {
                 for update in updates {
                     match update {
@@ -174,6 +241,9 @@ impl Player {
                                     self.set_fullscreen(!fullscreen);
                                 }
                                 ["exit-fullscreen"] => self.set_fullscreen(false),
+                                ["pointer-moved"] => self.pointer_moved(context),
+                                ["previous"] => mpv.command("playlist-prev", &[])?,
+                                ["next"] => mpv.command("playlist-next", &[])?,
                                 ["play-pause"] if self.idle => self.load(&mpv)?,
                                 ["play-pause"] => mpv.command("cycle", &["pause"])?,
                                 ["open-file", path] => {
@@ -199,6 +269,9 @@ impl Player {
             MpvUpdate::Paused(v) => self.paused = v,
             MpvUpdate::Volume(v) => self.volume = v,
             MpvUpdate::Muted(v) => self.muted = v,
+            MpvUpdate::Path(v) => self.file = Some(v),
+            MpvUpdate::PlaylistPos(v) => self.playlist_pos = v,
+            MpvUpdate::PlaylistCount(v) => self.playlist_count = v,
             MpvUpdate::FileLoaded => {
                 self.error = None;
                 if let Some(mpv) = &self.mpv {
@@ -290,6 +363,11 @@ impl Component for Player {
             duration: 0.0,
             volume: 100.0,
             muted: false,
+            playlist_pos: -1,
+            playlist_count: 0,
+            controls_shown: false,
+            last_pointer: Instant::now(),
+            hide_pending: false,
             tracks: Tracks::default(),
         };
         player.poll_events(context);
@@ -346,8 +424,23 @@ impl Component for Player {
         let title_bar = TitleBar::new()
             .title("rust-winui-mpv")
             .subtitle(self.subtitle())
-            .preferred_height(WindowTitleBarHeight::Tall)
-            .grid_row(0);
+            .preferred_height(WindowTitleBarHeight::Standard)
+            .grid_column(1);
+        // TitleBar in reactor 0.100 has no icon property, so the logo sits in
+        // its own column just left of it.
+        let logo = Image::new()
+            .source_data(EncodedImage::from_static(include_bytes!(
+                "../assets/logo-64.png"
+            )))
+            .width(16.0)
+            .height(16.0)
+            .margin(Thickness::new(12.0, 0.0, 0.0, 0.0))
+            .vertical_alignment(VerticalAlignment::Center)
+            .grid_column(0);
+        let title_row = Grid::new()
+            .columns([GridLength::Auto, GridLength::Star(1.0)])
+            .grid_row(0)
+            .children((logo, title_bar));
 
         // Seek row: position, seek bar, duration.
         let time = |seconds: f64, column: i32| {
@@ -368,7 +461,7 @@ impl Component for Player {
         let seek_row = Grid::new()
             .column_spacing(12.0)
             .columns([GridLength::Auto, GridLength::Star(1.0), GridLength::Auto])
-            .margin(Thickness::new(16.0, 0.0, 16.0, 0.0))
+            .margin(Thickness::new(12.0, 0.0, 12.0, 0.0))
             .grid_row(2)
             .children((time(self.position, 0), seek, time(self.duration, 2)));
 
@@ -404,10 +497,16 @@ impl Component for Player {
             .children((
                 icon_button(glyph::STOP, "Stop", Message::Stop, 0),
                 Button::new()
+                    .style(ButtonStyle::Subtle)
+                    .automation_name("Previous")
+                    .is_enabled(self.playlist_pos > 0)
+                    .on_click(context.message(Message::Previous))
+                    .content(FontIcon::new().glyph(glyph::PREVIOUS))
+                    .tooltip("Previous (Page Up)"),
+                Button::new()
                     .style(ButtonStyle::Accent)
                     .automation_name(if playing { "Pause" } else { "Play" })
-                    .min_width(48.0)
-                    .min_height(40.0)
+                    .min_width(44.0)
                     .on_click(context.message(Message::PlayPause))
                     .content(FontIcon::new().glyph(if playing {
                         glyph::PAUSE
@@ -419,6 +518,13 @@ impl Component for Player {
                     } else {
                         "Play (Space)"
                     }),
+                Button::new()
+                    .style(ButtonStyle::Subtle)
+                    .automation_name("Next")
+                    .is_enabled(self.playlist_pos + 1 < self.playlist_count)
+                    .on_click(context.message(Message::Next))
+                    .content(FontIcon::new().glyph(glyph::NEXT))
+                    .tooltip("Next (Page Down)"),
             ));
 
         let volume = Slider::new()
@@ -467,16 +573,18 @@ impl Component for Player {
                 GridLength::Auto,
                 GridLength::Star(1.0),
             ])
-            .margin(Thickness::new(12.0, 0.0, 12.0, 4.0))
+            .margin(Thickness::new(8.0, 0.0, 8.0, 2.0))
             .grid_row(3)
             .children((left, transport, right));
 
         // Row 1 is left empty: the native video window sits over it. In
-        // fullscreen the title bar and both control rows collapse.
-        let (title, seek_height, controls_height) = if fullscreen {
-            (0.0, 0.0, 0.0)
+        // fullscreen the title bar collapses, and the control rows show only
+        // while the pointer is moving.
+        let (title, bar) = self.chrome();
+        let (seek_height, controls_height) = if bar > 0.0 {
+            (SEEK_DIPS, CONTROLS_DIPS)
         } else {
-            (TITLE_DIPS, SEEK_DIPS, CONTROLS_DIPS)
+            (0.0, 0.0)
         };
         Grid::new()
             .rows([
@@ -485,7 +593,7 @@ impl Component for Player {
                 GridLength::Pixel(seek_height),
                 GridLength::Pixel(controls_height),
             ])
-            .children((title_bar, seek_row, controls))
+            .children((title_row, seek_row, controls))
     }
 }
 

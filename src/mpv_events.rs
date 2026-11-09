@@ -23,6 +23,10 @@ pub enum MpvUpdate {
     Idle(bool),
     Volume(f64),
     Muted(bool),
+    /// The file mpv is playing (changes when the playlist moves on).
+    Path(String),
+    PlaylistPos(i64),
+    PlaylistCount(i64),
     FileLoaded,
     /// A `script-message` from the video window (see `video_host`): the name,
     /// e.g. "toggle-fullscreen", followed by its arguments.
@@ -38,6 +42,9 @@ pub fn observe(mpv: &Mpv) -> libmpv2::Result<()> {
     mpv.observe_property("idle-active", Format::Flag, 0)?;
     mpv.observe_property("volume", Format::Double, 0)?;
     mpv.observe_property("mute", Format::Flag, 0)?;
+    mpv.observe_property("path", Format::String, 0)?;
+    mpv.observe_property("playlist-pos", Format::Int64, 0)?;
+    mpv.observe_property("playlist-count", Format::Int64, 0)?;
     Ok(())
 }
 
@@ -96,6 +103,9 @@ fn convert(event: Event<'_>) -> Option<MpvUpdate> {
             ("idle-active", PropertyData::Flag(v)) => Some(MpvUpdate::Idle(v)),
             ("volume", PropertyData::Double(v)) => Some(MpvUpdate::Volume(v)),
             ("mute", PropertyData::Flag(v)) => Some(MpvUpdate::Muted(v)),
+            ("path", PropertyData::Str(v)) => Some(MpvUpdate::Path(v.to_string())),
+            ("playlist-pos", PropertyData::Int64(v)) => Some(MpvUpdate::PlaylistPos(v)),
+            ("playlist-count", PropertyData::Int64(v)) => Some(MpvUpdate::PlaylistCount(v)),
             _ => None,
         },
         _ => None,

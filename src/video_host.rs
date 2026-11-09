@@ -17,29 +17,32 @@
 //! Fullscreen uses the classic Win32 approach on the WinUI window: drop the
 //! frame styles and cover the monitor, then restore the saved placement.
 
+use std::cell::Cell;
 use std::sync::{Arc, Once};
+use std::time::{Duration, Instant};
 
 use libmpv2::Mpv;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
     BLACK_BRUSH, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow,
+    MonitorFromWindow, PtInRect,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, VK_DOWN, VK_ESCAPE, VK_F, VK_LEFT, VK_M, VK_RIGHT, VK_SPACE, VK_UP,
+    SetFocus, VK_DOWN, VK_ESCAPE, VK_F, VK_LEFT, VK_M, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PREV_TRACK,
+    VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, GWL_STYLE, GWLP_USERDATA,
-    GetClassNameW, GetClientRect, GetParent, GetWindowLongPtrW, GetWindowPlacement, HWND_NOTOPMOST,
-    HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW, SWP_FRAMECHANGED,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
+    GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW, GetWindowPlacement,
+    GetWindowRect, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
     SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_NCDESTROY, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WNDCLASSW, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -175,6 +178,17 @@ impl VideoHost {
         }
     }
 
+    /// Whether the mouse pointer is over the video (rather than the controls).
+    pub fn cursor_over_video(&self) -> bool {
+        unsafe {
+            let mut point = POINT::default();
+            let mut rect = RECT::default();
+            GetCursorPos(&mut point).is_ok()
+                && GetWindowRect(self.child, &mut rect).is_ok()
+                && PtInRect(&rect, point).as_bool()
+        }
+    }
+
     /// The handle to pass to mpv's `wid` option.
     pub fn wid(&self) -> i64 {
         self.child.0 as i64
@@ -207,6 +221,26 @@ impl VideoHost {
     }
 }
 
+/// Tells the app the pointer moved over the video (it shows the controls in
+/// fullscreen). Windows also sends WM_MOUSEMOVE when nothing moved, and the
+/// app only needs a nudge every so often, so filter both.
+fn on_mouse_move(mpv: &Mpv, lparam: LPARAM) {
+    thread_local! {
+        static LAST: Cell<(isize, Option<Instant>)> = const { Cell::new((-1, None)) };
+    }
+    let pos = lparam.0 & 0xFFFF_FFFF;
+    LAST.with(|last| {
+        let (last_pos, last_sent) = last.get();
+        let due = last_sent.is_none_or(|t| t.elapsed() >= Duration::from_millis(250));
+        if pos != last_pos && due {
+            let _ = app_message(mpv, &["pointer-moved"]);
+            last.set((pos, Some(Instant::now())));
+        } else if pos != last_pos {
+            last.set((pos, last_sent));
+        }
+    });
+}
+
 /// Window procedure for the video host: player keys, double-click, and drops.
 unsafe extern "system" fn host_proc(
     hwnd: HWND,
@@ -225,6 +259,10 @@ unsafe extern "system" fn host_proc(
             WM_LBUTTONDOWN => {
                 let _ = unsafe { SetFocus(Some(hwnd)) };
                 true
+            }
+            WM_MOUSEMOVE => {
+                on_mouse_move(mpv, lparam);
+                false
             }
             WM_LBUTTONDBLCLK => {
                 let _ = app_message(mpv, &["toggle-fullscreen"]);
@@ -259,6 +297,12 @@ fn on_key(mpv: &Mpv, key: u16, repeat: bool) -> bool {
         k if k == VK_F.0 && !repeat => app_message(mpv, &["toggle-fullscreen"]),
         k if k == VK_ESCAPE.0 && !repeat => app_message(mpv, &["exit-fullscreen"]),
         k if k == VK_M.0 && !repeat => mpv.command("cycle", &["mute"]),
+        k if (k == VK_PRIOR.0 || k == VK_MEDIA_PREV_TRACK.0) && !repeat => {
+            app_message(mpv, &["previous"])
+        }
+        k if (k == VK_NEXT.0 || k == VK_MEDIA_NEXT_TRACK.0) && !repeat => {
+            app_message(mpv, &["next"])
+        }
         k if k == VK_LEFT.0 => mpv.command("seek", &[&format!("-{SEEK_STEP}"), "relative"]),
         k if k == VK_RIGHT.0 => mpv.command("seek", &[SEEK_STEP, "relative"]),
         k if k == VK_UP.0 || k == VK_DOWN.0 => {
@@ -271,7 +315,17 @@ fn on_key(mpv: &Mpv, key: u16, repeat: bool) -> bool {
             // The volume slider tops out at 100, so keep mpv there too.
             mpv.set_property("volume", (volume + step).clamp(0.0, 100.0))
         }
-        k if k == VK_SPACE.0 || k == VK_F.0 || k == VK_ESCAPE.0 || k == VK_M.0 => Ok(()),
+        k if k == VK_SPACE.0
+            || k == VK_F.0
+            || k == VK_ESCAPE.0
+            || k == VK_M.0
+            || k == VK_PRIOR.0
+            || k == VK_NEXT.0
+            || k == VK_MEDIA_PREV_TRACK.0
+            || k == VK_MEDIA_NEXT_TRACK.0 =>
+        {
+            Ok(())
+        }
         _ => return false,
     };
     // Seeking with nothing loaded fails harmlessly; there's nothing to report.
