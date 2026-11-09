@@ -47,7 +47,7 @@ enum Message {
     HideControlsCheck,
     /// A pick from the Tracks menu, identified by its label.
     TrackMenu(String),
-    Resized,
+    Resized(WindowSize),
     Mpv(Vec<MpvUpdate>),
 }
 
@@ -74,6 +74,8 @@ struct Player {
     hide_pending: bool,
     /// Play the file from the command line once the video window exists.
     autoplay: bool,
+    /// Window width in DIPs, for dropping or trimming content when narrow.
+    width: f64,
 }
 
 impl Player {
@@ -228,7 +230,10 @@ impl Player {
             Message::Previous => mpv.command("playlist-prev", &[])?,
             Message::Next => mpv.command("playlist-next", &[])?,
             Message::HideControlsCheck => self.hide_controls_check(context),
-            Message::Resized => self.relayout(),
+            Message::Resized(size) => {
+                self.width = size.width;
+                self.relayout();
+            }
             Message::Mpv(updates) => {
                 for update in updates {
                     match update {
@@ -309,17 +314,28 @@ impl Player {
             .as_deref()
             .map(|f| f.rsplit(['\\', '/']).next().unwrap_or(f))
             .unwrap_or("Open a file or drop one on the window");
-        // The TitleBar doesn't trim its subtitle, and a long one runs under
-        // the caption buttons in narrow windows.
-        const MAX_CHARS: usize = 40;
-        if name.chars().count() > MAX_CHARS {
-            let short: String = name.chars().take(MAX_CHARS - 1).collect();
+        let max_chars = subtitle_chars(self.width);
+        if name.chars().count() > max_chars {
+            let short: String = name.chars().take(max_chars - 1).collect();
             format!("{short}\u{2026}")
         } else {
             name.to_string()
         }
     }
 }
+
+/// How many characters of subtitle fit in the title bar at this window width.
+/// The TitleBar doesn't trim its subtitle, and a long one runs under the
+/// caption buttons. Roughly: the logo, title text and caption buttons take
+/// ~320 DIPs, and a subtitle character averages ~7 DIPs.
+fn subtitle_chars(width: f64) -> usize {
+    ((width - 320.0) / 7.0).clamp(8.0, 120.0) as usize
+}
+
+/// Below this width (DIPs) the volume slider is dropped so the speaker and
+/// full screen buttons keep their room; the speaker still mutes, and the
+/// Up/Down keys still change the volume.
+const VOLUME_SLIDER_MIN_WIDTH: f64 = 560.0;
 
 fn clock(seconds: f64) -> String {
     let s = seconds.max(0.0) as u64;
@@ -369,6 +385,7 @@ impl Component for Player {
             last_pointer: Instant::now(),
             hide_pending: false,
             tracks: Tracks::default(),
+            width: 1000.0,
         };
         player.poll_events(context);
         player
@@ -397,7 +414,7 @@ impl Component for Player {
     fn view(&self, _input: &(), context: &mut ViewContext<Self>) -> View {
         context.window_title("rust-winui-mpv");
         context.window_visuals(WindowVisuals::new().backdrop(WindowBackdrop::Mica));
-        context.on_window_size(context.callback(|_: WindowSize| Message::Resized));
+        context.on_window_size(context.callback(Message::Resized));
 
         let fullscreen = self.video.as_ref().is_some_and(VideoHost::is_fullscreen);
         let playing = !self.idle && !self.paused;
@@ -532,11 +549,14 @@ impl Component for Player {
             .maximum(100.0)
             .value(self.volume)
             .automation_name("Volume")
-            // Narrow enough that the speaker and full screen buttons keep
-            // their room at 800 px and 175% scaling (~460 DIPs).
             .width(72.0)
             .vertical_alignment(VerticalAlignment::Center)
             .on_value_changed(context.callback(Message::Volume));
+        let volume = if self.width >= VOLUME_SLIDER_MIN_WIDTH {
+            View::from(volume)
+        } else {
+            View::empty()
+        };
         let right = StackPanel::new()
             .orientation(Orientation::Horizontal)
             .spacing(4.0)
@@ -603,7 +623,15 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::clock;
+    use super::{clock, subtitle_chars};
+
+    #[test]
+    fn subtitle_room_scales_with_width() {
+        assert_eq!(subtitle_chars(200.0), 8);
+        assert_eq!(subtitle_chars(460.0), 20);
+        assert!(subtitle_chars(1200.0) > 100);
+        assert_eq!(subtitle_chars(5000.0), 120);
+    }
 
     #[test]
     fn clock_formats_minutes_and_hours() {
