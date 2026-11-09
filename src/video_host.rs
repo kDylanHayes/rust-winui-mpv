@@ -43,7 +43,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     LoadCursorW, RegisterClassW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
     SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT,
     WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
-    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
+    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    WindowFromPoint,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -167,8 +168,10 @@ impl VideoHost {
                 // Restore the frame and the normal-position rectangle in one
                 // SetWindowPos, so no frame shows the caption buttons on a
                 // still-fullscreen window. SetWindowPlacement then restores
-                // a maximized state, if the window had one.
-                SetWindowLongPtrW(self.parent, GWL_STYLE, style);
+                // a maximized state, if the window had one. WS_MAXIMIZE is
+                // left off until then: with it set, SetWindowPlacement sees an
+                // already-maximized window and leaves the restored size.
+                SetWindowLongPtrW(self.parent, GWL_STYLE, style & !(WS_MAXIMIZE.0 as isize));
                 let r = placement.rcNormalPosition;
                 let _ = SetWindowPos(
                     self.parent,
