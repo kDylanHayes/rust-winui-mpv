@@ -25,6 +25,7 @@ use windows_reactor::*;
 
 /// Heights in device-independent pixels: the title bar (WinUI's standard
 /// height), then the seek row and the controls row under the video.
+/// Title bar height until the caption buttons can be measured.
 const TITLE_DIPS: f64 = 32.0;
 const SEEK_DIPS: f64 = 30.0;
 const CONTROLS_DIPS: f64 = 44.0;
@@ -76,6 +77,8 @@ struct Player {
     autoplay: bool,
     /// Window width in DIPs, for dropping or trimming content when narrow.
     width: f64,
+    /// Title bar height in DIPs, matched to the caption buttons.
+    title_dips: f64,
 }
 
 impl Player {
@@ -96,7 +99,7 @@ impl Player {
             self.error = Some(format!("mpv rejected wid: {e}"));
             return;
         }
-        host.layout(TITLE_DIPS, BAR_DIPS);
+        host.layout(TITLE_DIPS, BAR_DIPS, 0.0);
         self.video = Some(host);
         if std::mem::take(&mut self.autoplay)
             && let Err(e) = self.load(mpv.clone().as_ref())
@@ -109,20 +112,39 @@ impl Player {
         self.video.as_ref().is_some_and(VideoHost::is_fullscreen)
     }
 
-    /// Heights of the title row and the seek/control rows. Windowed: both.
-    /// Fullscreen: the control rows only while `controls_shown`.
-    fn chrome(&self) -> (f64, f64) {
+    /// The title row height, the bar height reserved below the video, and the
+    /// bar height overlaid on the video. Windowed: title and reserved bar.
+    /// Fullscreen: the video fills the screen, and the bar is overlaid only
+    /// while `controls_shown`, so the picture never rescales.
+    fn chrome(&self) -> (f64, f64, f64) {
         match (self.is_fullscreen(), self.controls_shown) {
-            (false, _) => (TITLE_DIPS, BAR_DIPS),
-            (true, true) => (0.0, BAR_DIPS),
-            (true, false) => (0.0, 0.0),
+            (false, _) => (self.title_dips, BAR_DIPS, 0.0),
+            (true, true) => (0.0, 0.0, BAR_DIPS),
+            (true, false) => (0.0, 0.0, 0.0),
         }
     }
 
     fn relayout(&self) {
         if let Some(video) = &self.video {
-            let (top, bottom) = self.chrome();
-            video.layout(top, bottom);
+            let (top, bottom, overlay) = self.chrome();
+            video.layout(top, bottom, overlay);
+        }
+    }
+
+    /// Matches the title row to the caption buttons, which the Windows App
+    /// SDK doesn't always size to the title bar height it was asked for
+    /// (48 px rather than 56 px at 175% scaling, leaving a band under them).
+    fn match_caption_buttons(&mut self) {
+        let Some(height) = self
+            .video
+            .as_ref()
+            .and_then(VideoHost::caption_buttons_dips)
+        else {
+            return;
+        };
+        if (height - self.title_dips).abs() > 0.1 {
+            self.title_dips = height;
+            self.relayout();
         }
     }
 
@@ -386,6 +408,7 @@ impl Component for Player {
             hide_pending: false,
             tracks: Tracks::default(),
             width: 1000.0,
+            title_dips: TITLE_DIPS,
         };
         player.poll_events(context);
         player
@@ -393,6 +416,7 @@ impl Component for Player {
 
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
         self.ensure_video_host();
+        self.match_caption_buttons();
         // After a bar button, hand keyboard focus back to the video so the
         // player keys work and Space doesn't re-press the same button.
         let refocus = matches!(
@@ -600,8 +624,8 @@ impl Component for Player {
         // Row 1 is left empty: the native video window sits over it. In
         // fullscreen the title bar collapses, and the control rows show only
         // while the pointer is moving.
-        let (title, bar) = self.chrome();
-        let (seek_height, controls_height) = if bar > 0.0 {
+        let (title, bar, overlay) = self.chrome();
+        let (seek_height, controls_height) = if bar + overlay > 0.0 {
             (SEEK_DIPS, CONTROLS_DIPS)
         } else {
             (0.0, 0.0)

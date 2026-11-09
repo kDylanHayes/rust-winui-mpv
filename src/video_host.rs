@@ -4,7 +4,8 @@
 //! top-level WinUI window on the UI thread, then create a child window over the
 //! video area and hand its handle to mpv via the `wid` option. WinUI content
 //! can't draw over this child (the "airspace" limit), so the controls live in a
-//! bar below it.
+//! bar below it. In fullscreen a window region clips the bottom off the child
+//! instead, so the controls show through without resizing the video.
 //!
 //! Embedded mpv doesn't take mouse or keyboard input (clicks fall through its
 //! window to ours, and focus stays with WinUI), so this window handles input
@@ -24,8 +25,8 @@ use std::time::{Duration, Instant};
 use libmpv2::Mpv;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BLACK_BRUSH, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-    MonitorFromWindow, PtInRect,
+    BLACK_BRUSH, CreateRectRgn, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST,
+    MONITORINFO, MonitorFromWindow, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
@@ -36,13 +37,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, GWL_STYLE, GWLP_USERDATA,
-    GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW, GetWindowPlacement,
-    GetWindowRect, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WNDCLASSW, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, FindWindowExW, GWL_STYLE,
+    GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
+    GetWindowPlacement, GetWindowRect, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW,
+    LoadCursorW, RegisterClassW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
+    SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT,
+    WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
+    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -163,29 +164,49 @@ impl VideoHost {
                 );
                 self.windowed = Some((style, placement));
             } else if let Some((style, placement)) = self.windowed.take() {
+                // Restore the frame and the normal-position rectangle in one
+                // SetWindowPos, so no frame shows the caption buttons on a
+                // still-fullscreen window. SetWindowPlacement then restores
+                // a maximized state, if the window had one.
                 SetWindowLongPtrW(self.parent, GWL_STYLE, style);
-                let _ = SetWindowPlacement(self.parent, &placement);
+                let r = placement.rcNormalPosition;
                 let _ = SetWindowPos(
                     self.parent,
                     Some(HWND_NOTOPMOST),
-                    0,
-                    0,
-                    0,
-                    0,
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                    r.left,
+                    r.top,
+                    r.right - r.left,
+                    r.bottom - r.top,
+                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
                 );
+                let _ = SetWindowPlacement(self.parent, &placement);
             }
         }
     }
 
     /// Whether the mouse pointer is over the video (rather than the controls).
+    /// WindowFromPoint honours the window region set by `layout`.
     pub fn cursor_over_video(&self) -> bool {
+        let mut point = POINT::default();
+        unsafe { GetCursorPos(&mut point).is_ok() && WindowFromPoint(point) == self.child }
+    }
+
+    /// Height in DIPs of the Windows App SDK caption buttons (minimize,
+    /// maximize, close), so the title bar row can match them exactly.
+    pub fn caption_buttons_dips(&self) -> Option<f64> {
         unsafe {
-            let mut point = POINT::default();
+            let buttons = FindWindowExW(
+                Some(self.parent),
+                None,
+                w!("ReunionWindowingCaptionControls"),
+                PCWSTR::null(),
+            )
+            .ok()?;
             let mut rect = RECT::default();
-            GetCursorPos(&mut point).is_ok()
-                && GetWindowRect(self.child, &mut rect).is_ok()
-                && PtInRect(&rect, point).as_bool()
+            GetWindowRect(buttons, &mut rect).ok()?;
+            let height = rect.bottom - rect.top;
+            let scale = GetDpiForWindow(self.parent) as f64 / 96.0;
+            (height > 0 && scale > 0.0).then(|| height as f64 / scale)
         }
     }
 
@@ -195,18 +216,23 @@ impl VideoHost {
     }
 
     /// Fills the parent's client area between a top inset (the title bar)
-    /// and a bottom inset (the control bar), both in DIPs.
-    pub fn layout(&self, top_dips: f64, bottom_dips: f64) {
+    /// and a bottom inset (the control bar), all in DIPs.
+    ///
+    /// `overlay_dips` hides the bottom of the video without resizing it:
+    /// a window region clips it off, so the WinUI controls underneath show
+    /// through as an overlay. Fullscreen uses this so the picture doesn't
+    /// rescale and jump each time the controls show or hide.
+    pub fn layout(&self, top_dips: f64, bottom_dips: f64, overlay_dips: f64) {
         unsafe {
             let mut rect = RECT::default();
             if GetClientRect(self.parent, &mut rect).is_err() {
                 return;
             }
             let scale = GetDpiForWindow(self.parent) as f64 / 96.0;
-            let top = (top_dips * scale).round() as i32;
-            let bottom = (bottom_dips * scale).round() as i32;
+            let px = |dips: f64| (dips * scale).round() as i32;
+            let top = px(top_dips);
             let width = rect.right - rect.left;
-            let height = (rect.bottom - rect.top - top - bottom).max(0);
+            let height = (rect.bottom - rect.top - top - px(bottom_dips)).max(0);
             // HWND_TOP keeps the video above WinUI's own content window.
             let _ = SetWindowPos(
                 self.child,
@@ -217,6 +243,14 @@ impl VideoHost {
                 height,
                 SWP_NOACTIVATE,
             );
+            let overlay = px(overlay_dips);
+            if overlay > 0 {
+                // The window owns the region from here on.
+                let region = CreateRectRgn(0, 0, width, (height - overlay).max(0));
+                SetWindowRgn(self.child, Some(region), true);
+            } else {
+                SetWindowRgn(self.child, None, true);
+            }
         }
     }
 }
