@@ -13,7 +13,6 @@ mod mpv_events;
 mod playlist;
 mod tracks;
 mod video_host;
-mod window_corners;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -93,7 +92,6 @@ impl Player {
             return;
         };
         app_icon::apply(host.window());
-        window_corners::round(host.window());
         if let Err(e) = mpv.set_property("wid", host.wid()) {
             self.error = Some(format!("mpv rejected wid: {e}"));
             return;
