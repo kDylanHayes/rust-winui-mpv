@@ -4,6 +4,8 @@
 pub const PLAY: &str = "\u{E768}";
 pub const PAUSE: &str = "\u{E769}";
 pub const STOP: &str = "\u{E71A}";
+pub const PREVIOUS: &str = "\u{E892}";
+pub const NEXT: &str = "\u{E893}";
 pub const OPEN: &str = "\u{E8E5}";
 /// "ClosedCaption": the audio and subtitle tracks menu.
 pub const TRACKS: &str = "\u{E7F0}";
