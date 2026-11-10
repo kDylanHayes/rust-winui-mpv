@@ -496,9 +496,9 @@ fn on_key(mpv: &Mpv, key: i32, repeat: bool) -> bool {
         ),
         k if k == VK_M && once => mpv.command("cycle", &["mute"]),
         // Tracks: A cycles audio, V cycles subtitles (including off).
-        k if k == VK_A && once => mpv
-            .command("cycle", &["audio"])
-            .and_then(|()| show_track(mpv, "Audio", "audio", "aid")),
+        k if k == VK_A && once => {
+            cycle_audio(mpv).and_then(|()| show_track(mpv, "Audio", "audio", "aid"))
+        }
         k if k == VK_V && once => mpv
             .command("cycle", &["sub"])
             .and_then(|()| show_track(mpv, "Subtitles", "sub", "sid")),
@@ -561,6 +561,18 @@ const PLAYER_KEYS: &[i32] = &[
 fn show_speed(mpv: &Mpv) -> libmpv2::Result<()> {
     let speed = mpv.get_property::<f64>("speed")?;
     mpv.command("show-text", &[&format!("Speed: {speed:.2}x")])
+}
+
+/// Moves to the next audio track, skipping "no audio" (M mutes instead).
+fn cycle_audio(mpv: &Mpv) -> libmpv2::Result<()> {
+    mpv.command("cycle", &["audio"])?;
+    if mpv
+        .get_property::<String>("aid")
+        .is_ok_and(|aid| aid == "no")
+    {
+        mpv.command("cycle", &["audio"])?;
+    }
+    Ok(())
 }
 
 /// Shows the track now selected for `kind` ("audio" or "sub"): its title,
