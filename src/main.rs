@@ -211,7 +211,15 @@ impl Player {
         }
     }
 
+    /// A file change the user asked for isn't a drag outliving its file, so
+    /// it mustn't arm the seek hold-off.
+    fn end_seek_drag(&mut self) {
+        self.last_seek = None;
+        self.seek_hold = None;
+    }
+
     fn load(&mut self, mpv: &Mpv) -> libmpv2::Result<()> {
+        self.end_seek_drag();
         let Some(file) = &self.file else {
             return Ok(());
         };
@@ -374,7 +382,8 @@ impl Player {
 
     /// Plays the playlist entry `delta` away from the current one, or from
     /// the last one played if the list has ended.
-    fn step_playlist(&self, mpv: &Mpv, delta: i64) -> libmpv2::Result<()> {
+    fn step_playlist(&mut self, mpv: &Mpv, delta: i64) -> libmpv2::Result<()> {
+        self.end_seek_drag();
         let index = self.playlist_pos + delta;
         if self.playlist_pos >= 0 && (0..self.playlist_count).contains(&index) {
             mpv.command("playlist-play-index", &[&index.to_string()])?;
