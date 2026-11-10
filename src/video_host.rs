@@ -496,18 +496,12 @@ fn on_key(mpv: &Mpv, key: i32, repeat: bool) -> bool {
         ),
         k if k == VK_M && once => mpv.command("cycle", &["mute"]),
         // Tracks: A cycles audio, V cycles subtitles (including off).
-        k if k == VK_A && once => mpv.command("cycle", &["audio"]).and_then(|()| {
-            mpv.command(
-                "show-text",
-                &["Audio: ${current-tracks/audio/title:${aid}}"],
-            )
-        }),
-        k if k == VK_V && once => mpv.command("cycle", &["sub"]).and_then(|()| {
-            mpv.command(
-                "show-text",
-                &["Subtitles: ${current-tracks/sub/title:${sid}}"],
-            )
-        }),
+        k if k == VK_A && once => mpv
+            .command("cycle", &["audio"])
+            .and_then(|()| show_track(mpv, "Audio", "audio", "aid")),
+        k if k == VK_V && once => mpv
+            .command("cycle", &["sub"])
+            .and_then(|()| show_track(mpv, "Subtitles", "sub", "sid")),
         // Window and playlist
         k if k == VK_F && once => app_message(mpv, &["toggle-fullscreen"]),
         k if k == VK_ESCAPE && once => app_message(mpv, &["exit-fullscreen"]),
@@ -562,8 +556,27 @@ const PLAYER_KEYS: &[i32] = &[
     VK_NUMPAD9,
 ];
 
+// The text is built here: the mpv_command API doesn't expand `${property}`
+// in show-text without an extra prefix.
 fn show_speed(mpv: &Mpv) -> libmpv2::Result<()> {
-    mpv.command("show-text", &["Speed: ${speed}x"])
+    let speed = mpv.get_property::<f64>("speed")?;
+    mpv.command("show-text", &[&format!("Speed: {speed:.2}x")])
+}
+
+/// Shows the track now selected for `kind` ("audio" or "sub"): its title,
+/// else its language, else its number, or "Off".
+fn show_track(mpv: &Mpv, label: &str, kind: &str, id_property: &str) -> libmpv2::Result<()> {
+    let name = ["title", "lang"]
+        .iter()
+        .find_map(|field| {
+            mpv.get_property::<String>(&format!("current-tracks/{kind}/{field}"))
+                .ok()
+                .filter(|v| !v.is_empty())
+        })
+        .or_else(|| mpv.get_property::<String>(id_property).ok())
+        .filter(|v| v != "no")
+        .unwrap_or_else(|| "Off".into());
+    mpv.command("show-text", &[&format!("{label}: {name}")])
 }
 
 /// Changes the volume by `step`, within the 0-100 the volume slider shows.
