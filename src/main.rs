@@ -186,7 +186,10 @@ impl Player {
         if !self.is_fullscreen() || !self.controls_shown {
             return;
         }
-        let over_controls = self.video.as_ref().is_some_and(|v| !v.cursor_over_video());
+        let over_controls = self
+            .video
+            .as_ref()
+            .is_some_and(VideoHost::cursor_over_controls);
         if over_controls || self.last_pointer.elapsed() < CONTROLS_TIMEOUT {
             // Still in use: check again later.
             if over_controls {
@@ -231,6 +234,9 @@ impl Player {
                 // a user drag; skip tiny moves to avoid flooding mpv.
                 if !self.idle && (target - self.position).abs() >= 0.5 {
                     mpv.command("seek", &[&format!("{target:.2}"), "absolute"])?;
+                    // Show the drag target in the time label right away,
+                    // rather than when mpv reports the new position.
+                    self.position = target;
                 }
             }
             Message::Volume(volume) => {

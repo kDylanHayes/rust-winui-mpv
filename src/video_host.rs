@@ -37,14 +37,14 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, FindWindowExW, GWL_STYLE,
-    GWLP_USERDATA, GetClassNameW, GetClientRect, GetCursorPos, GetParent, GetWindowLongPtrW,
-    GetWindowPlacement, GetWindowRect, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW,
-    LoadCursorW, RegisterClassW, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
-    SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT,
-    WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY,
-    WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
-    WindowFromPoint,
+    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, FindWindowExW, GA_ROOTOWNER,
+    GWL_STYLE, GWLP_USERDATA, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
+    GetForegroundWindow, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
+    HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SetWindowLongPtrW, SetWindowPlacement,
+    SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK,
+    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_MAXIMIZE,
+    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -187,11 +187,20 @@ impl VideoHost {
         }
     }
 
-    /// Whether the mouse pointer is over the video (rather than the controls).
+    /// Whether the fullscreen controls are in use: our window is in the
+    /// foreground and the pointer is over our own content other than the
+    /// video, including its owned popups such as the Tracks menu. A pointer
+    /// on another window or monitor, or focus in another app, doesn't count.
     /// WindowFromPoint honours the window region set by `layout`.
-    pub fn cursor_over_video(&self) -> bool {
+    pub fn cursor_over_controls(&self) -> bool {
         let mut point = POINT::default();
-        unsafe { GetCursorPos(&mut point).is_ok() && WindowFromPoint(point) == self.child }
+        unsafe {
+            if GetForegroundWindow() != self.parent || GetCursorPos(&mut point).is_err() {
+                return false;
+            }
+            let hit = WindowFromPoint(point);
+            hit != self.child && GetAncestor(hit, GA_ROOTOWNER) == self.parent
+        }
     }
 
     /// Height in DIPs of the Windows App SDK caption buttons (minimize,
