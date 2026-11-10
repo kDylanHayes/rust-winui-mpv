@@ -1,10 +1,9 @@
 //! The standard Windows "Open" dialog, via the classic common dialog API.
 
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::Controls::Dialogs::{
-    GetOpenFileNameW, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
+use crate::bindings::{
+    GetOpenFileNameW, HWND, OFN_FILEMUSTEXIST, OFN_PATHMUSTEXIST, OPENFILENAMEW,
 };
-use windows::core::{PCWSTR, PWSTR, w};
+use windows_core::{PCWSTR, PWSTR, w};
 
 /// Shows a modal Open dialog owned by `owner`. Returns the chosen path, or
 /// `None` if the user cancelled.
@@ -21,7 +20,7 @@ pub fn pick_video(owner: Option<HWND>) -> Option<String> {
         lpstrFile: PWSTR(buffer.as_mut_ptr()),
         nMaxFile: buffer.len() as u32,
         lpstrTitle: PCWSTR::null(),
-        Flags: OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST,
+        Flags: (OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST) as u32,
         ..Default::default()
     };
     if !unsafe { GetOpenFileNameW(&mut ofn) }.as_bool() {
