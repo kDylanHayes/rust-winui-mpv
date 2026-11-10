@@ -30,6 +30,8 @@ const TITLE_DIPS: f64 = 32.0;
 const SEEK_DIPS: f64 = 30.0;
 const CONTROLS_DIPS: f64 = 44.0;
 /// How long the controls stay up in fullscreen after the pointer stops.
+/// How long the seek bar must be quiet after a file change before it seeks.
+const SEEK_HOLD: std::time::Duration = std::time::Duration::from_millis(1000);
 const CONTROLS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
 
@@ -79,6 +81,9 @@ struct Player {
     width: f64,
     /// Title bar height in DIPs, matched to the caption buttons.
     title_dips: f64,
+    /// Set when the file changes; seeks are dropped until the seek bar has
+    /// been quiet for `SEEK_HOLD` (see `Message::Seek`).
+    seek_hold: Option<Instant>,
 }
 
 impl Player {
@@ -232,16 +237,25 @@ impl Player {
             Message::Seek(target) => {
                 // Programmatic slider updates don't echo back, so this is
                 // a user drag; skip tiny moves to avoid flooding mpv.
-                // A drag can outlive its file: once the end is reached and
-                // the next file loads, the slider keeps sending values on the
-                // old file's scale. Those (and any while the new duration is
-                // still unknown) would end the new file at once and run
-                // through the playlist, so drop them.
-                let in_range = self.duration > 0.0 && target <= self.duration + 0.5;
+                // A drag can outlive its file: holding the thumb at the end
+                // ends the file, the next one loads, and the slider keeps
+                // reporting the held position (and a coerced value when its
+                // maximum shrinks), which would end that file too and run
+                // through the playlist. So after a file change, drop seeks
+                // until the slider has been quiet for a moment.
+                if let Some(since) = self.seek_hold {
+                    if since.elapsed() < SEEK_HOLD {
+                        self.seek_hold = Some(Instant::now());
+                        return Ok(());
+                    }
+                    self.seek_hold = None;
+                }
                 // Stop just short of the end so a drag doesn't end the file.
                 let target = target.min((self.duration - 0.5).max(0.0));
-                if !self.idle && in_range && (target - self.position).abs() >= 0.5 {
-                    mpv.command("seek", &[&format!("{target:.2}"), "absolute"])?;
+                if !self.idle && self.duration > 0.0 && (target - self.position).abs() >= 0.5 {
+                    // A failed seek (e.g. just as a file ends) isn't worth
+                    // reporting.
+                    let _ = mpv.command("seek", &[&format!("{target:.2}"), "absolute"]);
                     // Show the drag target in the time label right away,
                     // rather than when mpv reports the new position.
                     self.position = target;
@@ -310,7 +324,10 @@ impl Player {
             MpvUpdate::Paused(v) => self.paused = v,
             MpvUpdate::Volume(v) => self.volume = v,
             MpvUpdate::Muted(v) => self.muted = v,
-            MpvUpdate::Path(v) => self.file = Some(v),
+            MpvUpdate::Path(v) => {
+                self.seek_hold = Some(Instant::now());
+                self.file = Some(v);
+            }
             // mpv reports -1 once the last file ends; keep the last entry so
             // Previous and Next still work from there.
             MpvUpdate::PlaylistPos(v) if v >= 0 => self.playlist_pos = v,
@@ -436,6 +453,7 @@ impl Component for Player {
             tracks: Tracks::default(),
             width: 1000.0,
             title_dips: TITLE_DIPS,
+            seek_hold: None,
         };
         player.poll_events(context);
         player

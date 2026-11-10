@@ -79,6 +79,7 @@ pub fn describe(e: &libmpv2::Error) -> String {
         return e.to_string();
     };
     let text = match code {
+        -12 => "mpv couldn't run that command",
         -13 => "Loading the file failed",
         -14 => "Couldn't initialize audio output",
         -15 => "Couldn't initialize video output",
