@@ -31,6 +31,8 @@ const SEEK_DIPS: f64 = 30.0;
 const CONTROLS_DIPS: f64 = 44.0;
 /// How long the controls stay up in fullscreen after the pointer stops.
 /// How long the seek bar must be quiet after a file change before it seeks.
+/// A file change this soon after a seek counts as happening mid-drag.
+const SEEK_DRAG_RECENT: std::time::Duration = std::time::Duration::from_millis(2000);
 const SEEK_HOLD: std::time::Duration = std::time::Duration::from_millis(1000);
 const CONTROLS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
@@ -81,9 +83,11 @@ struct Player {
     width: f64,
     /// Title bar height in DIPs, matched to the caption buttons.
     title_dips: f64,
-    /// Set when the file changes; seeks are dropped until the seek bar has
-    /// been quiet for `SEEK_HOLD` (see `Message::Seek`).
+    /// Set when the file changes during a seek drag; seeks are dropped until
+    /// the seek bar has been quiet for `SEEK_HOLD` (see `Message::Seek`).
     seek_hold: Option<Instant>,
+    /// When the seek bar last reported a value.
+    last_seek: Option<Instant>,
 }
 
 impl Player {
@@ -241,8 +245,9 @@ impl Player {
                 // ends the file, the next one loads, and the slider keeps
                 // reporting the held position (and a coerced value when its
                 // maximum shrinks), which would end that file too and run
-                // through the playlist. So after a file change, drop seeks
-                // until the slider has been quiet for a moment.
+                // through the playlist. So after a file change mid-drag,
+                // drop seeks until the slider has been quiet for a moment.
+                self.last_seek = Some(Instant::now());
                 if let Some(since) = self.seek_hold {
                     if since.elapsed() < SEEK_HOLD {
                         self.seek_hold = Some(Instant::now());
@@ -325,7 +330,14 @@ impl Player {
             MpvUpdate::Volume(v) => self.volume = v,
             MpvUpdate::Muted(v) => self.muted = v,
             MpvUpdate::Path(v) => {
-                self.seek_hold = Some(Instant::now());
+                // Only a drag that was under way when the file changed needs
+                // holding off; a plain click on a fresh file must still seek.
+                if self
+                    .last_seek
+                    .is_some_and(|t| t.elapsed() < SEEK_DRAG_RECENT)
+                {
+                    self.seek_hold = Some(Instant::now());
+                }
                 self.file = Some(v);
             }
             // mpv reports -1 once the last file ends; keep the last entry so
@@ -454,6 +466,7 @@ impl Component for Player {
             width: 1000.0,
             title_dips: TITLE_DIPS,
             seek_hold: None,
+            last_seek: None,
         };
         player.poll_events(context);
         player
