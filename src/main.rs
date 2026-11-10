@@ -232,6 +232,10 @@ impl Player {
             Message::Seek(target) => {
                 // Programmatic slider updates don't echo back, so this is
                 // a user drag; skip tiny moves to avoid flooding mpv.
+                // Stop short of the end: a seek past it ends the file, the
+                // next one loads, and the rest of the drag's seeks then end
+                // that one too, running through the whole playlist.
+                let target = target.min((self.duration - 0.5).max(0.0));
                 if !self.idle && (target - self.position).abs() >= 0.5 {
                     mpv.command("seek", &[&format!("{target:.2}"), "absolute"])?;
                     // Show the drag target in the time label right away,
