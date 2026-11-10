@@ -143,6 +143,11 @@ pub unsafe fn GetForegroundWindow() -> HWND {
     unsafe { GetForegroundWindow() }
 }
 #[inline]
+pub unsafe fn GetKeyState(nvirtkey: i32) -> i16 {
+    windows_core::link!("user32.dll" "system" fn GetKeyState(nvirtkey : i32) -> i16);
+    unsafe { GetKeyState(nvirtkey) }
+}
+#[inline]
 pub unsafe fn GetModuleHandleW<P0>(lpmodulename: P0) -> HMODULE
 where
     P0: windows_core::Param<windows_core::PCWSTR>,
@@ -478,14 +483,27 @@ pub const SM_CYDRAG: i32 = 69;
 pub const SWP_FRAMECHANGED: i32 = 32;
 pub const SWP_NOACTIVATE: i32 = 16;
 pub const SWP_NOOWNERZORDER: i32 = 512;
+pub const VK_BACK: i32 = 8;
+pub const VK_CONTROL: i32 = 17;
 pub const VK_DOWN: i32 = 40;
 pub const VK_ESCAPE: i32 = 27;
+pub const VK_HOME: i32 = 36;
 pub const VK_LEFT: i32 = 37;
 pub const VK_MEDIA_NEXT_TRACK: i32 = 176;
+pub const VK_MEDIA_PLAY_PAUSE: i32 = 179;
 pub const VK_MEDIA_PREV_TRACK: i32 = 177;
+pub const VK_MEDIA_STOP: i32 = 178;
 pub const VK_NEXT: i32 = 34;
+pub const VK_NUMPAD0: i32 = 96;
+pub const VK_NUMPAD9: i32 = 105;
+pub const VK_OEM_4: i32 = 219;
+pub const VK_OEM_6: i32 = 221;
+pub const VK_OEM_COMMA: i32 = 188;
+pub const VK_OEM_PERIOD: i32 = 190;
 pub const VK_PRIOR: i32 = 33;
+pub const VK_RETURN: i32 = 13;
 pub const VK_RIGHT: i32 = 39;
+pub const VK_SHIFT: i32 = 16;
 pub const VK_SPACE: i32 = 32;
 pub const VK_UP: i32 = 38;
 #[repr(C)]
@@ -504,9 +522,11 @@ pub const WM_LBUTTONDBLCLK: i32 = 515;
 pub const WM_LBUTTONDOWN: i32 = 513;
 pub const WM_LBUTTONUP: i32 = 514;
 pub const WM_MOUSEMOVE: i32 = 512;
+pub const WM_MOUSEWHEEL: i32 = 522;
 pub const WM_NCDESTROY: i32 = 130;
 pub const WM_NCLBUTTONDOWN: i32 = 161;
 pub const WM_SETICON: i32 = 128;
+pub const WM_SYSKEYDOWN: i32 = 260;
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 pub struct WNDCLASSW {

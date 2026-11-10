@@ -324,6 +324,13 @@ impl Player {
                                 }
                                 ["exit-fullscreen"] => self.set_fullscreen(false),
                                 ["pointer-moved"] => self.pointer_moved(context),
+                                ["open-dialog"] => {
+                                    let owner = self.video.as_ref().map(VideoHost::window);
+                                    if let Some(path) = file_dialog::pick_video(owner) {
+                                        self.file = Some(path);
+                                        self.load(&mpv)?;
+                                    }
+                                }
                                 ["previous"] => self.step_playlist(&mpv, -1)?,
                                 ["next"] => self.step_playlist(&mpv, 1)?,
                                 ["play-pause"] if self.idle => self.load(&mpv)?,
@@ -436,7 +443,7 @@ fn subtitle_chars(width: f64) -> usize {
 /// Below this width (DIPs) the volume slider is dropped so the speaker and
 /// full screen buttons keep their room; the speaker still mutes, and the
 /// Up/Down keys still change the volume.
-const VOLUME_SLIDER_MIN_WIDTH: f64 = 560.0;
+const VOLUME_SLIDER_MIN_WIDTH: f64 = 590.0;
 
 fn clock(seconds: f64) -> String {
     let s = seconds.max(0.0) as u64;
@@ -654,7 +661,7 @@ impl Component for Player {
             .maximum(100.0)
             .value(self.volume)
             .automation_name("Volume")
-            .width(72.0)
+            .width(100.0)
             .vertical_alignment(VerticalAlignment::Center)
             .on_value_changed(context.callback(Message::Volume));
         let volume = if self.width >= VOLUME_SLIDER_MIN_WIDTH {

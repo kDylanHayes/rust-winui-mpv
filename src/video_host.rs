@@ -26,17 +26,19 @@ use crate::bindings::{
     BLACK_BRUSH, CS_DBLCLKS, ClientToScreen, CreateRectRgn, CreateWindowExW, DefWindowProcW,
     DragAcceptFiles, DragFinish, DragQueryFileW, EnumThreadWindows, FindWindowExW, GA_ROOTOWNER,
     GWL_STYLE, GWLP_USERDATA, GetAncestor, GetClassNameW, GetClientRect, GetCurrentThreadId,
-    GetCursorPos, GetDpiForWindow, GetForegroundWindow, GetModuleHandleW, GetMonitorInfoW,
-    GetParent, GetStockObject, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement,
-    GetWindowRect, HBRUSH, HDROP, HTCAPTION, HWND, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
-    IDC_ARROW, LPARAM, LRESULT, LoadCursorW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    GetCursorPos, GetDpiForWindow, GetForegroundWindow, GetKeyState, GetModuleHandleW,
+    GetMonitorInfoW, GetParent, GetStockObject, GetSystemMetrics, GetWindowLongPtrW,
+    GetWindowPlacement, GetWindowRect, HBRUSH, HDROP, HTCAPTION, HWND, HWND_NOTOPMOST, HWND_TOP,
+    HWND_TOPMOST, IDC_ARROW, LPARAM, LRESULT, LoadCursorW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
     MonitorFromWindow, POINT, RECT, RegisterClassW, ReleaseCapture, SM_CXDRAG, SM_CYDRAG,
     SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SendMessageW, SetFocus, SetWindowLongPtrW,
-    SetWindowPlacement, SetWindowPos, SetWindowRgn, VK_DOWN, VK_ESCAPE, VK_LEFT,
-    VK_MEDIA_NEXT_TRACK, VK_MEDIA_PREV_TRACK, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SPACE, VK_UP,
-    WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WNDCLASSW, WPARAM, WS_CAPTION, WS_CHILD,
-    WS_CLIPSIBLINGS, WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
+    SetWindowPlacement, SetWindowPos, SetWindowRgn, VK_BACK, VK_CONTROL, VK_DOWN, VK_ESCAPE,
+    VK_HOME, VK_LEFT, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PLAY_PAUSE, VK_MEDIA_PREV_TRACK, VK_MEDIA_STOP,
+    VK_NEXT, VK_NUMPAD0, VK_NUMPAD9, VK_OEM_4, VK_OEM_6, VK_OEM_COMMA, VK_OEM_PERIOD, VK_PRIOR,
+    VK_RETURN, VK_RIGHT, VK_SHIFT, VK_SPACE, VK_UP, WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN,
+    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_NCDESTROY,
+    WM_NCLBUTTONDOWN, WM_SYSKEYDOWN, WNDCLASSW, WPARAM, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
 };
 use libmpv2::Mpv;
 use windows_core::{BOOL, PCWSTR, PWSTR, w};
@@ -48,10 +50,28 @@ const HOST_CLASS: PCWSTR = w!("RustWinUiMpvVideoHost");
 const SEEK_STEP: &str = "5";
 const VOLUME_STEP: f64 = 5.0;
 
-/// Letter keys' virtual-key codes are their ASCII capitals; the Win32
-/// metadata has no constants for them.
+/// Letter and digit keys' virtual-key codes are their ASCII characters; the
+/// Win32 metadata has no constants for them.
+const VK_0: i32 = b'0' as i32;
+const VK_1: i32 = b'1' as i32;
+const VK_2: i32 = b'2' as i32;
+const VK_3: i32 = b'3' as i32;
+const VK_4: i32 = b'4' as i32;
+const VK_5: i32 = b'5' as i32;
+const VK_6: i32 = b'6' as i32;
+const VK_7: i32 = b'7' as i32;
+const VK_8: i32 = b'8' as i32;
+const VK_9: i32 = b'9' as i32;
+const VK_A: i32 = b'A' as i32;
 const VK_F: i32 = b'F' as i32;
+const VK_J: i32 = b'J' as i32;
+const VK_K: i32 = b'K' as i32;
+const VK_L: i32 = b'L' as i32;
 const VK_M: i32 = b'M' as i32;
+const VK_O: i32 = b'O' as i32;
+const VK_V: i32 = b'V' as i32;
+/// One notch of a mouse wheel.
+const WHEEL_DELTA: i32 = 120;
 /// WM_MOUSEMOVE's wParam flag for the left button.
 const MK_LBUTTON: usize = 0x0001;
 
@@ -329,6 +349,20 @@ unsafe extern "system" fn host_proc(
                 true
             }
             WM_KEYDOWN => on_key(mpv, wparam.0 as i32, lparam.0 & (1 << 30) != 0),
+            // Alt+Enter, the Windows convention for fullscreen. Other Alt
+            // keys go on to DefWindowProc (e.g. Alt+F4, Alt+Space).
+            WM_SYSKEYDOWN if wparam.0 as i32 == VK_RETURN => {
+                if lparam.0 & (1 << 30) == 0 {
+                    let _ = app_message(mpv, &["toggle-fullscreen"]);
+                }
+                true
+            }
+            // The wheel over the video changes the volume, a step per notch.
+            WM_MOUSEWHEEL => {
+                let notches = (wparam.0 >> 16) as u16 as i16 as i32 / WHEEL_DELTA;
+                let _ = change_volume(mpv, notches as f64 * VOLUME_STEP);
+                true
+            }
             WM_DROPFILES => {
                 let drop = HDROP(wparam.0 as _);
                 let mut path = vec![0u16; 32768];
@@ -396,46 +430,146 @@ fn drag_window(hwnd: HWND, lparam: LPARAM) {
     }
 }
 
+fn key_down(key: i32) -> bool {
+    (unsafe { GetKeyState(key) }) < 0
+}
+
 /// Handles a key press in the video and returns whether it was a player key.
-/// `repeat` is set for auto-repeat, which only seek and volume act on.
+/// `repeat` is set for auto-repeat, which only seeking, frame steps and
+/// volume act on. The keys follow mpv and YouTube where they agree.
 fn on_key(mpv: &Mpv, key: i32, repeat: bool) -> bool {
+    let ctrl = key_down(VK_CONTROL);
+    let shift = key_down(VK_SHIFT);
+    let once = !repeat;
+    let seek = |seconds: &str| mpv.command("seek", &[seconds, "relative+exact"]);
     let result = match key {
-        k if k == VK_SPACE && !repeat => app_message(mpv, &["play-pause"]),
-        k if k == VK_F && !repeat => app_message(mpv, &["toggle-fullscreen"]),
-        k if k == VK_ESCAPE && !repeat => app_message(mpv, &["exit-fullscreen"]),
-        k if k == VK_M && !repeat => mpv.command("cycle", &["mute"]),
-        k if (k == VK_PRIOR || k == VK_MEDIA_PREV_TRACK) && !repeat => {
-            app_message(mpv, &["previous"])
+        // Playback
+        k if (k == VK_SPACE || k == VK_K || k == VK_MEDIA_PLAY_PAUSE) && once => {
+            app_message(mpv, &["play-pause"])
         }
-        k if (k == VK_NEXT || k == VK_MEDIA_NEXT_TRACK) && !repeat => app_message(mpv, &["next"]),
-        k if k == VK_LEFT => mpv.command("seek", &[&format!("-{SEEK_STEP}"), "relative"]),
-        k if k == VK_RIGHT => mpv.command("seek", &[SEEK_STEP, "relative"]),
-        k if k == VK_UP || k == VK_DOWN => {
-            let step = if k == VK_UP {
+        k if k == VK_MEDIA_STOP && once => mpv.command("stop", &[]),
+        k if k == VK_O && ctrl && once => app_message(mpv, &["open-dialog"]),
+        // Seeking: arrows 5 s (Shift 1 s, Ctrl 1 min), J/L 10 s,
+        // Home to the start, 0-9 to 0-90 %.
+        k if k == VK_LEFT || k == VK_RIGHT => {
+            let step = match (ctrl, shift) {
+                (true, _) => "60",
+                (false, true) => "1",
+                _ => SEEK_STEP,
+            };
+            if k == VK_LEFT {
+                seek(&format!("-{step}"))
+            } else {
+                seek(step)
+            }
+        }
+        k if k == VK_J => seek("-10"),
+        k if k == VK_L => seek("10"),
+        k if k == VK_HOME && once => mpv.command("seek", &["0", "absolute"]),
+        k if (VK_0..=VK_9).contains(&k) && once => {
+            let percent = ((k - VK_0) * 10).to_string();
+            mpv.command("seek", &[&percent, "absolute-percent"])
+        }
+        k if (VK_NUMPAD0..=VK_NUMPAD9).contains(&k) && once => {
+            let percent = ((k - VK_NUMPAD0) * 10).to_string();
+            mpv.command("seek", &[&percent, "absolute-percent"])
+        }
+        // Frame by frame (pauses), and speed.
+        k if k == VK_OEM_PERIOD => mpv.command("frame-step", &[]),
+        k if k == VK_OEM_COMMA => mpv.command("frame-back-step", &[]),
+        k if k == VK_OEM_4 || k == VK_OEM_6 => {
+            let factor = if k == VK_OEM_6 { "1.1" } else { "0.9091" };
+            mpv.command("multiply", &["speed", factor])
+                .and_then(|()| show_speed(mpv))
+        }
+        k if k == VK_BACK && once => mpv
+            .set_property("speed", 1.0)
+            .and_then(|()| show_speed(mpv)),
+        // Volume
+        k if k == VK_UP || k == VK_DOWN => change_volume(
+            mpv,
+            if k == VK_UP {
                 VOLUME_STEP
             } else {
                 -VOLUME_STEP
-            };
-            let volume = mpv.get_property::<f64>("volume").unwrap_or(100.0);
-            // The volume slider tops out at 100, so keep mpv there too.
-            mpv.set_property("volume", (volume + step).clamp(0.0, 100.0))
-        }
-        k if k == VK_SPACE
-            || k == VK_F
-            || k == VK_ESCAPE
-            || k == VK_M
-            || k == VK_PRIOR
-            || k == VK_NEXT
-            || k == VK_MEDIA_PREV_TRACK
-            || k == VK_MEDIA_NEXT_TRACK =>
-        {
-            Ok(())
-        }
+            },
+        ),
+        k if k == VK_M && once => mpv.command("cycle", &["mute"]),
+        // Tracks: A cycles audio, V cycles subtitles (including off).
+        k if k == VK_A && once => mpv.command("cycle", &["audio"]).and_then(|()| {
+            mpv.command(
+                "show-text",
+                &["Audio: ${current-tracks/audio/title:${aid}}"],
+            )
+        }),
+        k if k == VK_V && once => mpv.command("cycle", &["sub"]).and_then(|()| {
+            mpv.command(
+                "show-text",
+                &["Subtitles: ${current-tracks/sub/title:${sid}}"],
+            )
+        }),
+        // Window and playlist
+        k if k == VK_F && once => app_message(mpv, &["toggle-fullscreen"]),
+        k if k == VK_ESCAPE && once => app_message(mpv, &["exit-fullscreen"]),
+        k if (k == VK_PRIOR || k == VK_MEDIA_PREV_TRACK) && once => app_message(mpv, &["previous"]),
+        k if (k == VK_NEXT || k == VK_MEDIA_NEXT_TRACK) && once => app_message(mpv, &["next"]),
+        // A held key's repeats are still ours, just ignored.
+        k if PLAYER_KEYS.contains(&k) => Ok(()),
         _ => return false,
     };
     // Seeking with nothing loaded fails harmlessly; there's nothing to report.
     let _ = result;
     true
+}
+
+/// Every key `on_key` handles, so their auto-repeats are swallowed too.
+const PLAYER_KEYS: &[i32] = &[
+    VK_SPACE,
+    VK_K,
+    VK_MEDIA_PLAY_PAUSE,
+    VK_MEDIA_STOP,
+    VK_O,
+    VK_HOME,
+    VK_BACK,
+    VK_M,
+    VK_A,
+    VK_V,
+    VK_F,
+    VK_ESCAPE,
+    VK_PRIOR,
+    VK_NEXT,
+    VK_MEDIA_PREV_TRACK,
+    VK_MEDIA_NEXT_TRACK,
+    VK_0,
+    VK_1,
+    VK_2,
+    VK_3,
+    VK_4,
+    VK_5,
+    VK_6,
+    VK_7,
+    VK_8,
+    VK_9,
+    VK_NUMPAD0,
+    VK_NUMPAD0 + 1,
+    VK_NUMPAD0 + 2,
+    VK_NUMPAD0 + 3,
+    VK_NUMPAD0 + 4,
+    VK_NUMPAD0 + 5,
+    VK_NUMPAD0 + 6,
+    VK_NUMPAD0 + 7,
+    VK_NUMPAD0 + 8,
+    VK_NUMPAD9,
+];
+
+fn show_speed(mpv: &Mpv) -> libmpv2::Result<()> {
+    mpv.command("show-text", &["Speed: ${speed}x"])
+}
+
+/// Changes the volume by `step`, within the 0-100 the volume slider shows.
+fn change_volume(mpv: &Mpv, step: f64) -> libmpv2::Result<()> {
+    let volume = mpv.get_property::<f64>("volume").unwrap_or(100.0);
+    mpv.set_property("volume", (volume + step).clamp(0.0, 100.0))
 }
 
 /// Asks the app to do something it owns. Arrives as `MpvUpdate::ClientMessage`.

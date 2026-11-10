@@ -46,6 +46,26 @@ and **libmpv** for playback (via [`libmpv2`](https://crates.io/crates/libmpv2)).
 The build script links against `mpv/mpv.lib` and copies `libmpv-2.dll` next to the exe.
 To keep the mpv files elsewhere, set `MPV_DIR` to that folder.
 
+## Controls
+
+| Keys | Action |
+| --- | --- |
+| Space, K, media Play/Pause | Play / pause |
+| Left / Right | Seek 5 s (Shift: 1 s, Ctrl: 1 min) |
+| J / L | Seek 10 s back / forward |
+| Home, 0-9 | Jump to the start, or to 0-90 % |
+| , / . | Step one frame back / forward |
+| [ / ], Backspace | Slower / faster, normal speed |
+| Up / Down, mouse wheel | Volume |
+| M | Mute |
+| A / V | Next audio / subtitle track |
+| F, Alt+Enter, double-click | Full screen (Esc leaves) |
+| Page Up / Page Down, media keys | Previous / next file in the folder |
+| Ctrl+O | Open a file (or drop one on the window) |
+| Drag the video | Move the window |
+
+Keys work while the video has focus; clicking it gives it focus.
+
 ## Tests and CI
 
 ```powershell
