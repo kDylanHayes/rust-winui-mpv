@@ -22,32 +22,24 @@ use std::cell::Cell;
 use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
-use libmpv2::Mpv;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{
-    BLACK_BRUSH, ClientToScreen, CreateRectRgn, GetMonitorInfoW, GetStockObject, HBRUSH,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, SetWindowRgn,
-};
-use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::Threading::GetCurrentThreadId;
-use windows::Win32::UI::HiDpi::GetDpiForWindow;
-use windows::Win32::UI::Input::KeyboardAndMouse::{
-    ReleaseCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_F, VK_LEFT, VK_M, VK_MEDIA_NEXT_TRACK,
-    VK_MEDIA_PREV_TRACK, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SPACE, VK_UP,
-};
-use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
-use windows::Win32::UI::WindowsAndMessaging::{
-    CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, FindWindowExW, GA_ROOTOWNER,
-    GWL_STYLE, GWLP_USERDATA, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement,
-    GetWindowRect, HTCAPTION, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
-    RegisterClassW, SM_CXDRAG, SM_CYDRAG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
-    SendMessageW, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE,
+use crate::bindings::{
+    BLACK_BRUSH, CS_DBLCLKS, ClientToScreen, CreateRectRgn, CreateWindowExW, DefWindowProcW,
+    DragAcceptFiles, DragFinish, DragQueryFileW, EnumThreadWindows, FindWindowExW, GA_ROOTOWNER,
+    GWL_STYLE, GWLP_USERDATA, GetAncestor, GetClassNameW, GetClientRect, GetCurrentThreadId,
+    GetCursorPos, GetDpiForWindow, GetForegroundWindow, GetModuleHandleW, GetMonitorInfoW,
+    GetParent, GetStockObject, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement,
+    GetWindowRect, HBRUSH, HDROP, HTCAPTION, HWND, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST,
+    IDC_ARROW, LPARAM, LRESULT, LoadCursorW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+    MonitorFromWindow, POINT, RECT, RegisterClassW, ReleaseCapture, SM_CXDRAG, SM_CYDRAG,
+    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SendMessageW, SetFocus, SetWindowLongPtrW,
+    SetWindowPlacement, SetWindowPos, SetWindowRgn, VK_DOWN, VK_ESCAPE, VK_LEFT,
+    VK_MEDIA_NEXT_TRACK, VK_MEDIA_PREV_TRACK, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SPACE, VK_UP,
     WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
-    WM_MOUSEMOVE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS,
-    WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WNDCLASSW, WPARAM, WS_CAPTION, WS_CHILD,
+    WS_CLIPSIBLINGS, WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
 };
-use windows::core::{BOOL, PCWSTR, w};
+use libmpv2::Mpv;
+use windows_core::{BOOL, PCWSTR, PWSTR, w};
 
 const WINUI_WINDOW_CLASS: &str = "WinUIDesktopWin32WindowClass";
 const HOST_CLASS: PCWSTR = w!("RustWinUiMpvVideoHost");
@@ -55,6 +47,13 @@ const HOST_CLASS: PCWSTR = w!("RustWinUiMpvVideoHost");
 /// Seconds the arrow keys seek by, and the volume step for Up/Down.
 const SEEK_STEP: &str = "5";
 const VOLUME_STEP: f64 = 5.0;
+
+/// Letter keys' virtual-key codes are their ASCII capitals; the Win32
+/// metadata has no constants for them.
+const VK_F: i32 = b'F' as i32;
+const VK_M: i32 = b'M' as i32;
+/// WM_MOUSEMOVE's wParam flag for the left button.
+const MK_LBUTTON: usize = 0x0001;
 
 pub struct VideoHost {
     parent: HWND,
@@ -68,14 +67,17 @@ impl VideoHost {
     pub fn create(mpv: Arc<Mpv>) -> Option<Self> {
         let parent = find_own_winui_window()?;
         let child = unsafe {
-            let instance = GetModuleHandleW(None).ok()?;
+            let instance = GetModuleHandleW(None);
+            if instance.0.is_null() {
+                return None;
+            }
             static REGISTER: Once = Once::new();
             REGISTER.call_once(|| {
                 let class = WNDCLASSW {
-                    style: CS_DBLCLKS,
+                    style: CS_DBLCLKS as u32,
                     lpfnWndProc: Some(host_proc),
-                    hInstance: instance.into(),
-                    hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+                    hInstance: instance,
+                    hCursor: LoadCursorW(None, IDC_ARROW),
                     hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
                     lpszClassName: HOST_CLASS,
                     ..Default::default()
@@ -83,20 +85,22 @@ impl VideoHost {
                 RegisterClassW(&class);
             });
             let child = CreateWindowExW(
-                WINDOW_EX_STYLE(0),
+                0,
                 HOST_CLASS,
                 w!(""),
-                WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+                (WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS) as u32,
                 0,
                 0,
                 0,
                 0,
                 Some(parent),
                 None,
-                Some(instance.into()),
+                Some(instance),
                 None,
-            )
-            .ok()?;
+            );
+            if child.0.is_null() {
+                return None;
+            }
             // Owned by the window from here on; released in WM_NCDESTROY.
             SetWindowLongPtrW(child, GWLP_USERDATA, Arc::into_raw(mpv) as isize);
             DragAcceptFiles(child, true);
@@ -142,8 +146,8 @@ impl VideoHost {
                     cbSize: size_of::<MONITORINFO>() as u32,
                     ..Default::default()
                 };
-                let hmon = MonitorFromWindow(self.parent, MONITOR_DEFAULTTONEAREST);
-                if GetWindowPlacement(self.parent, &mut placement).is_err()
+                let hmon = MonitorFromWindow(self.parent, MONITOR_DEFAULTTONEAREST as u32);
+                if !GetWindowPlacement(self.parent, &mut placement).as_bool()
                     || !GetMonitorInfoW(hmon, &mut monitor).as_bool()
                 {
                     return;
@@ -151,7 +155,7 @@ impl VideoHost {
                 SetWindowLongPtrW(
                     self.parent,
                     GWL_STYLE,
-                    style & !(WS_OVERLAPPEDWINDOW.0 as isize),
+                    style & !(WS_OVERLAPPEDWINDOW as isize),
                 );
                 let r = monitor.rcMonitor;
                 // Topmost, or the taskbar stays drawn over the video.
@@ -162,7 +166,7 @@ impl VideoHost {
                     r.top,
                     r.right - r.left,
                     r.bottom - r.top,
-                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                    (SWP_NOOWNERZORDER | SWP_FRAMECHANGED) as u32,
                 );
                 self.windowed = Some((style, placement));
             } else if let Some((style, placement)) = self.windowed.take() {
@@ -172,7 +176,7 @@ impl VideoHost {
                 // a maximized state, if the window had one. WS_MAXIMIZE is
                 // left off until then: with it set, SetWindowPlacement sees an
                 // already-maximized window and leaves the restored size.
-                SetWindowLongPtrW(self.parent, GWL_STYLE, style & !(WS_MAXIMIZE.0 as isize));
+                SetWindowLongPtrW(self.parent, GWL_STYLE, style & !(WS_MAXIMIZE as isize));
                 let r = placement.rcNormalPosition;
                 let _ = SetWindowPos(
                     self.parent,
@@ -181,7 +185,7 @@ impl VideoHost {
                     r.top,
                     r.right - r.left,
                     r.bottom - r.top,
-                    SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+                    (SWP_NOOWNERZORDER | SWP_FRAMECHANGED) as u32,
                 );
                 let _ = SetWindowPlacement(self.parent, &placement);
             }
@@ -196,11 +200,11 @@ impl VideoHost {
     pub fn cursor_over_controls(&self) -> bool {
         let mut point = POINT::default();
         unsafe {
-            if GetForegroundWindow() != self.parent || GetCursorPos(&mut point).is_err() {
+            if GetForegroundWindow() != self.parent || !GetCursorPos(&mut point).as_bool() {
                 return false;
             }
             let hit = WindowFromPoint(point);
-            hit != self.child && GetAncestor(hit, GA_ROOTOWNER) == self.parent
+            hit != self.child && GetAncestor(hit, GA_ROOTOWNER as u32) == self.parent
         }
     }
 
@@ -213,10 +217,11 @@ impl VideoHost {
                 None,
                 w!("ReunionWindowingCaptionControls"),
                 PCWSTR::null(),
-            )
-            .ok()?;
+            );
             let mut rect = RECT::default();
-            GetWindowRect(buttons, &mut rect).ok()?;
+            if buttons.0.is_null() || !GetWindowRect(buttons, &mut rect).as_bool() {
+                return None;
+            }
             let height = rect.bottom - rect.top;
             let scale = GetDpiForWindow(self.parent) as f64 / 96.0;
             (height > 0 && scale > 0.0).then(|| height as f64 / scale)
@@ -238,7 +243,7 @@ impl VideoHost {
     pub fn layout(&self, top_dips: f64, bottom_dips: f64, overlay_dips: f64) {
         unsafe {
             let mut rect = RECT::default();
-            if GetClientRect(self.parent, &mut rect).is_err() {
+            if !GetClientRect(self.parent, &mut rect).as_bool() {
                 return;
             }
             let scale = GetDpiForWindow(self.parent) as f64 / 96.0;
@@ -254,7 +259,7 @@ impl VideoHost {
                 top,
                 width,
                 height,
-                SWP_NOACTIVATE,
+                SWP_NOACTIVATE as u32,
             );
             let overlay = px(overlay_dips);
             if overlay > 0 {
@@ -296,13 +301,13 @@ unsafe extern "system" fn host_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     let mpv_ptr = unsafe { GetWindowLongPtrW(hwnd, GWLP_USERDATA) } as *const Mpv;
-    if msg == WM_NCDESTROY && !mpv_ptr.is_null() {
+    if msg == WM_NCDESTROY as u32 && !mpv_ptr.is_null() {
         unsafe {
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
             drop(Arc::from_raw(mpv_ptr));
         }
     } else if let Some(mpv) = unsafe { mpv_ptr.as_ref() } {
-        let handled = match msg {
+        let handled = match msg as i32 {
             WM_LBUTTONDOWN => {
                 let _ = unsafe { SetFocus(Some(hwnd)) };
                 DRAG_FROM.set(Some(screen_point(hwnd, lparam)));
@@ -323,11 +328,13 @@ unsafe extern "system" fn host_proc(
                 let _ = app_message(mpv, &["toggle-fullscreen"]);
                 true
             }
-            WM_KEYDOWN => on_key(mpv, wparam.0 as u16, lparam.0 & (1 << 30) != 0),
+            WM_KEYDOWN => on_key(mpv, wparam.0 as i32, lparam.0 & (1 << 30) != 0),
             WM_DROPFILES => {
                 let drop = HDROP(wparam.0 as _);
                 let mut path = vec![0u16; 32768];
-                let len = unsafe { DragQueryFileW(drop, 0, Some(&mut path)) } as usize;
+                let len = unsafe {
+                    DragQueryFileW(drop, 0, Some(PWSTR(path.as_mut_ptr())), path.len() as u32)
+                } as usize;
                 unsafe { DragFinish(drop) };
                 if len > 0 {
                     let path = String::from_utf16_lossy(&path[..len]);
@@ -343,9 +350,6 @@ unsafe extern "system" fn host_proc(
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
-
-/// WM_MOUSEMOVE's wParam flag for the left button (MK_LBUTTON).
-const MK_LBUTTON: usize = 0x0001;
 
 thread_local! {
     /// Where the left button went down on the video, until it's released or
@@ -375,8 +379,8 @@ fn drag_window(hwnd: HWND, lparam: LPARAM) {
     }
     DRAG_FROM.set(None);
     unsafe {
-        let Ok(parent) = GetParent(hwnd) else { return };
-        if GetWindowLongPtrW(parent, GWL_STYLE) & WS_CAPTION.0 as isize == 0 {
+        let parent = GetParent(hwnd);
+        if parent.0.is_null() || GetWindowLongPtrW(parent, GWL_STYLE) & WS_CAPTION as isize == 0 {
             return;
         }
         // Hand the press to the window's own move loop, as if it were on
@@ -385,31 +389,29 @@ fn drag_window(hwnd: HWND, lparam: LPARAM) {
         let packed = ((from.y as u16 as isize) << 16) | from.x as u16 as isize;
         SendMessageW(
             parent,
-            WM_NCLBUTTONDOWN,
-            Some(WPARAM(HTCAPTION as usize)),
-            Some(LPARAM(packed)),
+            WM_NCLBUTTONDOWN as u32,
+            WPARAM(HTCAPTION as usize),
+            LPARAM(packed),
         );
     }
 }
 
 /// Handles a key press in the video and returns whether it was a player key.
 /// `repeat` is set for auto-repeat, which only seek and volume act on.
-fn on_key(mpv: &Mpv, key: u16, repeat: bool) -> bool {
+fn on_key(mpv: &Mpv, key: i32, repeat: bool) -> bool {
     let result = match key {
-        k if k == VK_SPACE.0 && !repeat => app_message(mpv, &["play-pause"]),
-        k if k == VK_F.0 && !repeat => app_message(mpv, &["toggle-fullscreen"]),
-        k if k == VK_ESCAPE.0 && !repeat => app_message(mpv, &["exit-fullscreen"]),
-        k if k == VK_M.0 && !repeat => mpv.command("cycle", &["mute"]),
-        k if (k == VK_PRIOR.0 || k == VK_MEDIA_PREV_TRACK.0) && !repeat => {
+        k if k == VK_SPACE && !repeat => app_message(mpv, &["play-pause"]),
+        k if k == VK_F && !repeat => app_message(mpv, &["toggle-fullscreen"]),
+        k if k == VK_ESCAPE && !repeat => app_message(mpv, &["exit-fullscreen"]),
+        k if k == VK_M && !repeat => mpv.command("cycle", &["mute"]),
+        k if (k == VK_PRIOR || k == VK_MEDIA_PREV_TRACK) && !repeat => {
             app_message(mpv, &["previous"])
         }
-        k if (k == VK_NEXT.0 || k == VK_MEDIA_NEXT_TRACK.0) && !repeat => {
-            app_message(mpv, &["next"])
-        }
-        k if k == VK_LEFT.0 => mpv.command("seek", &[&format!("-{SEEK_STEP}"), "relative"]),
-        k if k == VK_RIGHT.0 => mpv.command("seek", &[SEEK_STEP, "relative"]),
-        k if k == VK_UP.0 || k == VK_DOWN.0 => {
-            let step = if k == VK_UP.0 {
+        k if (k == VK_NEXT || k == VK_MEDIA_NEXT_TRACK) && !repeat => app_message(mpv, &["next"]),
+        k if k == VK_LEFT => mpv.command("seek", &[&format!("-{SEEK_STEP}"), "relative"]),
+        k if k == VK_RIGHT => mpv.command("seek", &[SEEK_STEP, "relative"]),
+        k if k == VK_UP || k == VK_DOWN => {
+            let step = if k == VK_UP {
                 VOLUME_STEP
             } else {
                 -VOLUME_STEP
@@ -418,14 +420,14 @@ fn on_key(mpv: &Mpv, key: u16, repeat: bool) -> bool {
             // The volume slider tops out at 100, so keep mpv there too.
             mpv.set_property("volume", (volume + step).clamp(0.0, 100.0))
         }
-        k if k == VK_SPACE.0
-            || k == VK_F.0
-            || k == VK_ESCAPE.0
-            || k == VK_M.0
-            || k == VK_PRIOR.0
-            || k == VK_NEXT.0
-            || k == VK_MEDIA_PREV_TRACK.0
-            || k == VK_MEDIA_NEXT_TRACK.0 =>
+        k if k == VK_SPACE
+            || k == VK_F
+            || k == VK_ESCAPE
+            || k == VK_M
+            || k == VK_PRIOR
+            || k == VK_NEXT
+            || k == VK_MEDIA_PREV_TRACK
+            || k == VK_MEDIA_NEXT_TRACK =>
         {
             Ok(())
         }
@@ -444,8 +446,9 @@ fn app_message(mpv: &Mpv, args: &[&str]) -> libmpv2::Result<()> {
 fn find_own_winui_window() -> Option<HWND> {
     unsafe extern "system" fn visit(hwnd: HWND, found: LPARAM) -> BOOL {
         let mut name = [0u16; 64];
-        let len = unsafe { GetClassNameW(hwnd, &mut name) } as usize;
-        let is_top_level = unsafe { GetParent(hwnd) }.is_err();
+        let len =
+            unsafe { GetClassNameW(hwnd, PWSTR(name.as_mut_ptr()), name.len() as i32) } as usize;
+        let is_top_level = unsafe { GetParent(hwnd) }.0.is_null();
         if is_top_level && String::from_utf16_lossy(&name[..len]) == WINUI_WINDOW_CLASS {
             unsafe { *(found.0 as *mut HWND) = hwnd };
             return false.into();
@@ -461,5 +464,5 @@ fn find_own_winui_window() -> Option<HWND> {
             LPARAM(&mut found as *mut HWND as isize),
         );
     }
-    (!found.is_invalid()).then_some(found)
+    (!found.0.is_null()).then_some(found)
 }
