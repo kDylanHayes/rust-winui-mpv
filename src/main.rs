@@ -25,10 +25,15 @@ use windows_reactor::*;
 
 /// Heights in device-independent pixels: the title bar (WinUI's standard
 /// height), then the seek row and the controls row under the video.
+/// Title bar height until the caption buttons can be measured.
 const TITLE_DIPS: f64 = 32.0;
 const SEEK_DIPS: f64 = 30.0;
 const CONTROLS_DIPS: f64 = 44.0;
 /// How long the controls stay up in fullscreen after the pointer stops.
+/// How long the seek bar must be quiet after a file change before it seeks.
+/// A file change this soon after a seek counts as happening mid-drag.
+const SEEK_DRAG_RECENT: std::time::Duration = std::time::Duration::from_millis(2000);
+const SEEK_HOLD: std::time::Duration = std::time::Duration::from_millis(1000);
 const CONTROLS_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(2500);
 const BAR_DIPS: f64 = SEEK_DIPS + CONTROLS_DIPS;
 
@@ -76,6 +81,13 @@ struct Player {
     autoplay: bool,
     /// Window width in DIPs, for dropping or trimming content when narrow.
     width: f64,
+    /// Title bar height in DIPs, matched to the caption buttons.
+    title_dips: f64,
+    /// Set when the file changes during a seek drag; seeks are dropped until
+    /// the seek bar has been quiet for `SEEK_HOLD` (see `Message::Seek`).
+    seek_hold: Option<Instant>,
+    /// When the seek bar last reported a value.
+    last_seek: Option<Instant>,
 }
 
 impl Player {
@@ -96,7 +108,7 @@ impl Player {
             self.error = Some(format!("mpv rejected wid: {e}"));
             return;
         }
-        host.layout(TITLE_DIPS, BAR_DIPS);
+        host.layout(TITLE_DIPS, BAR_DIPS, 0.0);
         self.video = Some(host);
         if std::mem::take(&mut self.autoplay)
             && let Err(e) = self.load(mpv.clone().as_ref())
@@ -109,20 +121,39 @@ impl Player {
         self.video.as_ref().is_some_and(VideoHost::is_fullscreen)
     }
 
-    /// Heights of the title row and the seek/control rows. Windowed: both.
-    /// Fullscreen: the control rows only while `controls_shown`.
-    fn chrome(&self) -> (f64, f64) {
+    /// The title row height, the bar height reserved below the video, and the
+    /// bar height overlaid on the video. Windowed: title and reserved bar.
+    /// Fullscreen: the video fills the screen, and the bar is overlaid only
+    /// while `controls_shown`, so the picture never rescales.
+    fn chrome(&self) -> (f64, f64, f64) {
         match (self.is_fullscreen(), self.controls_shown) {
-            (false, _) => (TITLE_DIPS, BAR_DIPS),
-            (true, true) => (0.0, BAR_DIPS),
-            (true, false) => (0.0, 0.0),
+            (false, _) => (self.title_dips, BAR_DIPS, 0.0),
+            (true, true) => (0.0, 0.0, BAR_DIPS),
+            (true, false) => (0.0, 0.0, 0.0),
         }
     }
 
     fn relayout(&self) {
         if let Some(video) = &self.video {
-            let (top, bottom) = self.chrome();
-            video.layout(top, bottom);
+            let (top, bottom, overlay) = self.chrome();
+            video.layout(top, bottom, overlay);
+        }
+    }
+
+    /// Matches the title row to the caption buttons, which the Windows App
+    /// SDK doesn't always size to the title bar height it was asked for
+    /// (48 px rather than 56 px at 175% scaling, leaving a band under them).
+    fn match_caption_buttons(&mut self) {
+        let Some(height) = self
+            .video
+            .as_ref()
+            .and_then(VideoHost::caption_buttons_dips)
+        else {
+            return;
+        };
+        if (height - self.title_dips).abs() > 0.1 {
+            self.title_dips = height;
+            self.relayout();
         }
     }
 
@@ -164,7 +195,10 @@ impl Player {
         if !self.is_fullscreen() || !self.controls_shown {
             return;
         }
-        let over_controls = self.video.as_ref().is_some_and(|v| !v.cursor_over_video());
+        let over_controls = self
+            .video
+            .as_ref()
+            .is_some_and(VideoHost::cursor_over_controls);
         if over_controls || self.last_pointer.elapsed() < CONTROLS_TIMEOUT {
             // Still in use: check again later.
             if over_controls {
@@ -177,7 +211,15 @@ impl Player {
         }
     }
 
+    /// A file change the user asked for isn't a drag outliving its file, so
+    /// it mustn't arm the seek hold-off.
+    fn end_seek_drag(&mut self) {
+        self.last_seek = None;
+        self.seek_hold = None;
+    }
+
     fn load(&mut self, mpv: &Mpv) -> libmpv2::Result<()> {
+        self.end_seek_drag();
         let Some(file) = &self.file else {
             return Ok(());
         };
@@ -207,8 +249,29 @@ impl Player {
             Message::Seek(target) => {
                 // Programmatic slider updates don't echo back, so this is
                 // a user drag; skip tiny moves to avoid flooding mpv.
-                if !self.idle && (target - self.position).abs() >= 0.5 {
-                    mpv.command("seek", &[&format!("{target:.2}"), "absolute"])?;
+                // A drag can outlive its file: holding the thumb at the end
+                // ends the file, the next one loads, and the slider keeps
+                // reporting the held position (and a coerced value when its
+                // maximum shrinks), which would end that file too and run
+                // through the playlist. So after a file change mid-drag,
+                // drop seeks until the slider has been quiet for a moment.
+                self.last_seek = Some(Instant::now());
+                if let Some(since) = self.seek_hold {
+                    if since.elapsed() < SEEK_HOLD {
+                        self.seek_hold = Some(Instant::now());
+                        return Ok(());
+                    }
+                    self.seek_hold = None;
+                }
+                // Stop just short of the end so a drag doesn't end the file.
+                let target = target.min((self.duration - 0.5).max(0.0));
+                if !self.idle && self.duration > 0.0 && (target - self.position).abs() >= 0.5 {
+                    // A failed seek (e.g. just as a file ends) isn't worth
+                    // reporting.
+                    let _ = mpv.command("seek", &[&format!("{target:.2}"), "absolute"]);
+                    // Show the drag target in the time label right away,
+                    // rather than when mpv reports the new position.
+                    self.position = target;
                 }
             }
             Message::Volume(volume) => {
@@ -227,8 +290,8 @@ impl Player {
                     self.tracks = Tracks::load(&mpv);
                 }
             }
-            Message::Previous => mpv.command("playlist-prev", &[])?,
-            Message::Next => mpv.command("playlist-next", &[])?,
+            Message::Previous => self.step_playlist(&mpv, -1)?,
+            Message::Next => self.step_playlist(&mpv, 1)?,
             Message::HideControlsCheck => self.hide_controls_check(context),
             Message::Resized(size) => {
                 self.width = size.width;
@@ -247,8 +310,8 @@ impl Player {
                                 }
                                 ["exit-fullscreen"] => self.set_fullscreen(false),
                                 ["pointer-moved"] => self.pointer_moved(context),
-                                ["previous"] => mpv.command("playlist-prev", &[])?,
-                                ["next"] => mpv.command("playlist-next", &[])?,
+                                ["previous"] => self.step_playlist(&mpv, -1)?,
+                                ["next"] => self.step_playlist(&mpv, 1)?,
                                 ["play-pause"] if self.idle => self.load(&mpv)?,
                                 ["play-pause"] => mpv.command("cycle", &["pause"])?,
                                 ["open-file", path] => {
@@ -274,8 +337,21 @@ impl Player {
             MpvUpdate::Paused(v) => self.paused = v,
             MpvUpdate::Volume(v) => self.volume = v,
             MpvUpdate::Muted(v) => self.muted = v,
-            MpvUpdate::Path(v) => self.file = Some(v),
-            MpvUpdate::PlaylistPos(v) => self.playlist_pos = v,
+            MpvUpdate::Path(v) => {
+                // Only a drag that was under way when the file changed needs
+                // holding off; a plain click on a fresh file must still seek.
+                if self
+                    .last_seek
+                    .is_some_and(|t| t.elapsed() < SEEK_DRAG_RECENT)
+                {
+                    self.seek_hold = Some(Instant::now());
+                }
+                self.file = Some(v);
+            }
+            // mpv reports -1 once the last file ends; keep the last entry so
+            // Previous and Next still work from there.
+            MpvUpdate::PlaylistPos(v) if v >= 0 => self.playlist_pos = v,
+            MpvUpdate::PlaylistPos(_) => {}
             MpvUpdate::PlaylistCount(v) => self.playlist_count = v,
             MpvUpdate::FileLoaded => {
                 self.error = None;
@@ -302,6 +378,17 @@ impl Player {
         context.spawn_background(move |token| {
             Message::Mpv(mpv_events::next_batch(&mpv, || token.is_cancelled()))
         });
+    }
+
+    /// Plays the playlist entry `delta` away from the current one, or from
+    /// the last one played if the list has ended.
+    fn step_playlist(&mut self, mpv: &Mpv, delta: i64) -> libmpv2::Result<()> {
+        self.end_seek_drag();
+        let index = self.playlist_pos + delta;
+        if self.playlist_pos >= 0 && (0..self.playlist_count).contains(&index) {
+            mpv.command("playlist-play-index", &[&index.to_string()])?;
+        }
+        Ok(())
     }
 
     /// Title bar subtitle: the current error, else the file name.
@@ -386,6 +473,9 @@ impl Component for Player {
             hide_pending: false,
             tracks: Tracks::default(),
             width: 1000.0,
+            title_dips: TITLE_DIPS,
+            seek_hold: None,
+            last_seek: None,
         };
         player.poll_events(context);
         player
@@ -393,6 +483,7 @@ impl Component for Player {
 
     fn update(&mut self, message: Message, context: &ComponentContext<Self>) {
         self.ensure_video_host();
+        self.match_caption_buttons();
         // After a bar button, hand keyboard focus back to the video so the
         // player keys work and Space doesn't re-press the same button.
         let refocus = matches!(
@@ -600,8 +691,8 @@ impl Component for Player {
         // Row 1 is left empty: the native video window sits over it. In
         // fullscreen the title bar collapses, and the control rows show only
         // while the pointer is moving.
-        let (title, bar) = self.chrome();
-        let (seek_height, controls_height) = if bar > 0.0 {
+        let (title, bar, overlay) = self.chrome();
+        let (seek_height, controls_height) = if bar + overlay > 0.0 {
             (SEEK_DIPS, CONTROLS_DIPS)
         } else {
             (0.0, 0.0)
