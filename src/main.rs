@@ -232,11 +232,15 @@ impl Player {
             Message::Seek(target) => {
                 // Programmatic slider updates don't echo back, so this is
                 // a user drag; skip tiny moves to avoid flooding mpv.
-                // Stop short of the end: a seek past it ends the file, the
-                // next one loads, and the rest of the drag's seeks then end
-                // that one too, running through the whole playlist.
+                // A drag can outlive its file: once the end is reached and
+                // the next file loads, the slider keeps sending values on the
+                // old file's scale. Those (and any while the new duration is
+                // still unknown) would end the new file at once and run
+                // through the playlist, so drop them.
+                let in_range = self.duration > 0.0 && target <= self.duration + 0.5;
+                // Stop just short of the end so a drag doesn't end the file.
                 let target = target.min((self.duration - 0.5).max(0.0));
-                if !self.idle && (target - self.position).abs() >= 0.5 {
+                if !self.idle && in_range && (target - self.position).abs() >= 0.5 {
                     mpv.command("seek", &[&format!("{target:.2}"), "absolute"])?;
                     // Show the drag target in the time label right away,
                     // rather than when mpv reports the new position.
@@ -259,8 +263,8 @@ impl Player {
                     self.tracks = Tracks::load(&mpv);
                 }
             }
-            Message::Previous => mpv.command("playlist-prev", &[])?,
-            Message::Next => mpv.command("playlist-next", &[])?,
+            Message::Previous => self.step_playlist(&mpv, -1)?,
+            Message::Next => self.step_playlist(&mpv, 1)?,
             Message::HideControlsCheck => self.hide_controls_check(context),
             Message::Resized(size) => {
                 self.width = size.width;
@@ -279,8 +283,8 @@ impl Player {
                                 }
                                 ["exit-fullscreen"] => self.set_fullscreen(false),
                                 ["pointer-moved"] => self.pointer_moved(context),
-                                ["previous"] => mpv.command("playlist-prev", &[])?,
-                                ["next"] => mpv.command("playlist-next", &[])?,
+                                ["previous"] => self.step_playlist(&mpv, -1)?,
+                                ["next"] => self.step_playlist(&mpv, 1)?,
                                 ["play-pause"] if self.idle => self.load(&mpv)?,
                                 ["play-pause"] => mpv.command("cycle", &["pause"])?,
                                 ["open-file", path] => {
@@ -307,7 +311,10 @@ impl Player {
             MpvUpdate::Volume(v) => self.volume = v,
             MpvUpdate::Muted(v) => self.muted = v,
             MpvUpdate::Path(v) => self.file = Some(v),
-            MpvUpdate::PlaylistPos(v) => self.playlist_pos = v,
+            // mpv reports -1 once the last file ends; keep the last entry so
+            // Previous and Next still work from there.
+            MpvUpdate::PlaylistPos(v) if v >= 0 => self.playlist_pos = v,
+            MpvUpdate::PlaylistPos(_) => {}
             MpvUpdate::PlaylistCount(v) => self.playlist_count = v,
             MpvUpdate::FileLoaded => {
                 self.error = None;
@@ -334,6 +341,16 @@ impl Player {
         context.spawn_background(move |token| {
             Message::Mpv(mpv_events::next_batch(&mpv, || token.is_cancelled()))
         });
+    }
+
+    /// Plays the playlist entry `delta` away from the current one, or from
+    /// the last one played if the list has ended.
+    fn step_playlist(&self, mpv: &Mpv, delta: i64) -> libmpv2::Result<()> {
+        let index = self.playlist_pos + delta;
+        if self.playlist_pos >= 0 && (0..self.playlist_count).contains(&index) {
+            mpv.command("playlist-play-index", &[&index.to_string()])?;
+        }
+        Ok(())
     }
 
     /// Title bar subtitle: the current error, else the file name.
