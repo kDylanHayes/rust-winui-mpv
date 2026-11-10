@@ -25,26 +25,27 @@ use std::time::{Duration, Instant};
 use libmpv2::Mpv;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BLACK_BRUSH, CreateRectRgn, GetMonitorInfoW, GetStockObject, HBRUSH, MONITOR_DEFAULTTONEAREST,
-    MONITORINFO, MonitorFromWindow, SetWindowRgn,
+    BLACK_BRUSH, ClientToScreen, CreateRectRgn, GetMonitorInfoW, GetStockObject, HBRUSH,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    SetFocus, VK_DOWN, VK_ESCAPE, VK_F, VK_LEFT, VK_M, VK_MEDIA_NEXT_TRACK, VK_MEDIA_PREV_TRACK,
-    VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SPACE, VK_UP,
+    ReleaseCapture, SetFocus, VK_DOWN, VK_ESCAPE, VK_F, VK_LEFT, VK_M, VK_MEDIA_NEXT_TRACK,
+    VK_MEDIA_PREV_TRACK, VK_NEXT, VK_PRIOR, VK_RIGHT, VK_SPACE, VK_UP,
 };
 use windows::Win32::UI::Shell::{DragAcceptFiles, DragFinish, DragQueryFileW, HDROP};
 use windows::Win32::UI::WindowsAndMessaging::{
     CS_DBLCLKS, CreateWindowExW, DefWindowProcW, EnumThreadWindows, FindWindowExW, GA_ROOTOWNER,
     GWL_STYLE, GWLP_USERDATA, GetAncestor, GetClassNameW, GetClientRect, GetCursorPos,
-    GetForegroundWindow, GetParent, GetWindowLongPtrW, GetWindowPlacement, GetWindowRect,
-    HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW, RegisterClassW,
-    SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER, SetWindowLongPtrW, SetWindowPlacement,
-    SetWindowPos, WINDOW_EX_STYLE, WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK,
-    WM_LBUTTONDOWN, WM_MOUSEMOVE, WM_NCDESTROY, WNDCLASSW, WS_CHILD, WS_CLIPSIBLINGS, WS_MAXIMIZE,
-    WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
+    GetForegroundWindow, GetParent, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement,
+    GetWindowRect, HTCAPTION, HWND_NOTOPMOST, HWND_TOP, HWND_TOPMOST, IDC_ARROW, LoadCursorW,
+    RegisterClassW, SM_CXDRAG, SM_CYDRAG, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOOWNERZORDER,
+    SendMessageW, SetWindowLongPtrW, SetWindowPlacement, SetWindowPos, WINDOW_EX_STYLE,
+    WINDOWPLACEMENT, WM_DROPFILES, WM_KEYDOWN, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NCDESTROY, WM_NCLBUTTONDOWN, WNDCLASSW, WS_CAPTION, WS_CHILD, WS_CLIPSIBLINGS,
+    WS_MAXIMIZE, WS_OVERLAPPEDWINDOW, WS_VISIBLE, WindowFromPoint,
 };
 use windows::core::{BOOL, PCWSTR, w};
 
@@ -304,9 +305,17 @@ unsafe extern "system" fn host_proc(
         let handled = match msg {
             WM_LBUTTONDOWN => {
                 let _ = unsafe { SetFocus(Some(hwnd)) };
+                DRAG_FROM.set(Some(screen_point(hwnd, lparam)));
                 true
             }
+            WM_LBUTTONUP => {
+                DRAG_FROM.set(None);
+                false
+            }
             WM_MOUSEMOVE => {
+                if wparam.0 & MK_LBUTTON != 0 {
+                    drag_window(hwnd, lparam);
+                }
                 on_mouse_move(mpv, lparam);
                 false
             }
@@ -333,6 +342,54 @@ unsafe extern "system" fn host_proc(
         }
     }
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+/// WM_MOUSEMOVE's wParam flag for the left button (MK_LBUTTON).
+const MK_LBUTTON: usize = 0x0001;
+
+thread_local! {
+    /// Where the left button went down on the video, until it's released or
+    /// a window drag starts.
+    static DRAG_FROM: Cell<Option<POINT>> = const { Cell::new(None) };
+}
+
+fn screen_point(hwnd: HWND, lparam: LPARAM) -> POINT {
+    let mut point = POINT {
+        x: (lparam.0 & 0xFFFF) as i16 as i32,
+        y: ((lparam.0 >> 16) & 0xFFFF) as i16 as i32,
+    };
+    let _ = unsafe { ClientToScreen(hwnd, &mut point) };
+    point
+}
+
+/// Moves the window when the video is dragged, like dragging the title bar.
+/// The drag starts only past the system drag distance, so a click or a
+/// double-click (fullscreen) still works. Not in fullscreen, where the
+/// window has no frame to move.
+fn drag_window(hwnd: HWND, lparam: LPARAM) {
+    let Some(from) = DRAG_FROM.get() else { return };
+    let now = screen_point(hwnd, lparam);
+    let (dx, dy) = unsafe { (GetSystemMetrics(SM_CXDRAG), GetSystemMetrics(SM_CYDRAG)) };
+    if (now.x - from.x).abs() < dx && (now.y - from.y).abs() < dy {
+        return;
+    }
+    DRAG_FROM.set(None);
+    unsafe {
+        let Ok(parent) = GetParent(hwnd) else { return };
+        if GetWindowLongPtrW(parent, GWL_STYLE) & WS_CAPTION.0 as isize == 0 {
+            return;
+        }
+        // Hand the press to the window's own move loop, as if it were on
+        // the caption.
+        let _ = ReleaseCapture();
+        let packed = ((from.y as u16 as isize) << 16) | from.x as u16 as isize;
+        SendMessageW(
+            parent,
+            WM_NCLBUTTONDOWN,
+            Some(WPARAM(HTCAPTION as usize)),
+            Some(LPARAM(packed)),
+        );
+    }
 }
 
 /// Handles a key press in the video and returns whether it was a player key.
